@@ -1,2 +1,1 @@
-streamlit>=1.42
-authlib
+streamlit[auth]>=1.42
