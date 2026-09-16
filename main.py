@@ -8,11 +8,11 @@ st.set_page_config(page_title="Yuaan Post", layout="centered")
 
 # ---------------------------------------------------------------------------
 # Persistent storage
-#   - Media files (photos/videos) -> saved to disk in "uploads/"
-#   - Post data (description, timestamp) -> "posts" table in SQLite
-#   - Each post can have MANY media files -> "media" table, linked by post_id
-# This survives page refreshes and shows the same feed on any device, since
-# everything lives on the server rather than in the browser session.
+#   - users  -> one row per signed-in Google account, with their chosen name
+#   - posts  -> one row per post, linked to the author's email
+#   - media  -> one row per photo/video, linked to a post (many per post)
+# Everything lives on the server (SQLite + disk), so it survives refreshes
+# and looks the same on every device.
 # ---------------------------------------------------------------------------
 UPLOAD_DIR = "uploads"
 DB_PATH = "diary.db"
@@ -28,6 +28,15 @@ def init_db():
     conn = get_conn()
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS users (
+            email TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS posts (
             id TEXT PRIMARY KEY,
             note TEXT NOT NULL,
@@ -35,6 +44,11 @@ def init_db():
         )
         """
     )
+    # Migrate older databases (from before login existed) by adding the column.
+    try:
+        conn.execute("ALTER TABLE posts ADD COLUMN author_email TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS media (
@@ -51,14 +65,34 @@ def init_db():
     conn.close()
 
 
-def save_post(note, uploaded_files):
+def get_display_name(email):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT display_name FROM users WHERE email = ?", (email,)
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def save_display_name(email, name):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO users (email, display_name, created_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(email) DO UPDATE SET display_name = excluded.display_name",
+        (email, name, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_post(author_email, note, uploaded_files):
     post_id = str(uuid.uuid4())
     created_at = datetime.now().isoformat()
 
     conn = get_conn()
     conn.execute(
-        "INSERT INTO posts (id, note, created_at) VALUES (?, ?, ?)",
-        (post_id, note, created_at),
+        "INSERT INTO posts (id, note, created_at, author_email) VALUES (?, ?, ?, ?)",
+        (post_id, note, created_at, author_email),
     )
 
     for position, uploaded_file in enumerate(uploaded_files):
@@ -80,11 +114,17 @@ def save_post(note, uploaded_files):
 def load_posts():
     conn = get_conn()
     posts = conn.execute(
-        "SELECT id, note, created_at FROM posts ORDER BY created_at DESC"
+        """
+        SELECT posts.id, posts.note, posts.created_at,
+               COALESCE(users.display_name, 'Yuaan Post') AS author_name
+        FROM posts
+        LEFT JOIN users ON users.email = posts.author_email
+        ORDER BY posts.created_at DESC
+        """
     ).fetchall()
 
     result = []
-    for post_id, note, created_at in posts:
+    for post_id, note, created_at, author_name in posts:
         media_rows = conn.execute(
             "SELECT file_path, file_type FROM media WHERE post_id = ? ORDER BY position",
             (post_id,),
@@ -93,6 +133,7 @@ def load_posts():
             {
                 "note": note,
                 "created_at": created_at,
+                "author_name": author_name,
                 "media": [m for m in media_rows if os.path.exists(m[0])],
             }
         )
@@ -137,10 +178,49 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ---------------------------------------------------------------------------
+# 1. Require Google sign-in before anything else
+# ---------------------------------------------------------------------------
+if not st.user.is_logged_in:
+    st.title("📷 Yuaan Post")
+    st.write("Sign in with Google to see and share posts.")
+    st.button("Sign in with Google", on_click=st.login, type="primary")
+    st.stop()
+
+user_email = st.user.email
+display_name = get_display_name(user_email)
+
+# ---------------------------------------------------------------------------
+# 2. First time signing in -> ask what name to post as
+# ---------------------------------------------------------------------------
+if display_name is None:
+    st.title("👋 Welcome!")
+    st.write(f"Signed in as **{st.user.email}**")
+    st.write("What name should we show on your posts?")
+    with st.form("name_form"):
+        suggested = getattr(st.user, "name", "") or ""
+        name_input = st.text_input("Your display name", value=suggested)
+        name_submit = st.form_submit_button("Continue")
+        if name_submit:
+            if name_input.strip():
+                save_display_name(user_email, name_input.strip())
+                st.rerun()
+            else:
+                st.warning("Please enter a name.")
+    st.stop()
+
+# ---------------------------------------------------------------------------
+# 3. Sidebar: who's logged in + logout
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.write(f"Signed in as **{display_name}**")
+    st.caption(user_email)
+    st.button("Log out", on_click=st.logout)
+
 st.title("📷 Yuaan Post")
 
 # ---------------------------------------------------------------------------
-# Post composer
+# 4. Post composer
 # ---------------------------------------------------------------------------
 with st.form("diary_form", clear_on_submit=True):
     st.write("Come and post your Story")
@@ -154,13 +234,13 @@ with st.form("diary_form", clear_on_submit=True):
 
     if submit_button:
         if uploaded_files and note:
-            save_post(note, uploaded_files)
+            save_post(user_email, note, uploaded_files)
             st.success("Saved! 🎉")
         else:
             st.warning("Don't forget to add a description and at least one photo or video!")
 
 # ---------------------------------------------------------------------------
-# Feed — Facebook-style cards with a media grid
+# 5. Feed — Facebook-style cards with a media grid
 # ---------------------------------------------------------------------------
 st.write("")
 st.header("My Posts")
@@ -179,7 +259,6 @@ def render_media_grid(media):
             st.image(path, use_container_width=True)
         return
 
-    # 2+ items: lay out in a responsive 2-column photo grid
     for i in range(0, count, 2):
         row = media[i:i + 2]
         cols = st.columns(len(row))
@@ -197,13 +276,14 @@ if not posts:
     st.caption("No posts yet — be the first to share something!")
 
 for post in posts:
+    initial = post["author_name"][:1].upper() if post["author_name"] else "Y"
     st.markdown('<div class="fb-card">', unsafe_allow_html=True)
     st.markdown(
         f"""
         <div class="fb-header">
-            <div class="fb-avatar">Y</div>
+            <div class="fb-avatar">{initial}</div>
             <div>
-                <div class="fb-name">Yuaan Post</div>
+                <div class="fb-name">{post['author_name']}</div>
                 <div class="fb-time">{pretty_time(post['created_at'])}</div>
             </div>
         </div>
