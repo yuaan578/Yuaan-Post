@@ -150,7 +150,7 @@ with st.form("diary_form", clear_on_submit=True): # สร้างแบบฟ�
 
 # --- ส่วนของการแสดงผล Feed และ คอมเมนต์ ---
 st.write("") # เว้นบรรทัด
-st.header("ฟีดโพสต์ทั้งหมด") # หัวข้อ Feed
+st.header("All posts") # หัวข้อ Feed
 
 conn = sqlite3.connect(DB_PATH) # เชื่อมต่อฐานข้อมูลเพื่อดึงโพสต์
 # ดึงโพสต์ทั้งหมดจากตาราง พร้อมหาชื่อโปรไฟล์ของผู้โพสต์จากตาราง users
