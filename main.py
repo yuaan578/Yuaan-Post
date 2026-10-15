@@ -118,14 +118,30 @@ CSS_TEMPLATE = """
 html, body, .stApp, [data-testid="stMarkdownContainer"], input, textarea, button { font-family: 'DM Sans', sans-serif; }
 h1, h2, h3, .yp-banner-title { font-family: 'Bricolage Grotesque', sans-serif !important; letter-spacing: -0.02em; }
 
-.stApp { background: __BG__; color: __INK__; }
-[data-testid="stHeader"] { background: transparent; }
-[data-testid="stBottom"] > div { background: __BG__; }
-.stApp p, .stApp label, .stApp li, .stApp span, [data-testid="stCaptionContainer"] { color: __INK__; }
+.stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] { background: __BG__ !important; color: __INK__; }
+[data-testid="stHeader"] { background: transparent !important; }
+[data-testid="stBottom"] > div { background: __BG__ !important; }
+.stApp p, .stApp label, .stApp li, .stApp span, [data-testid="stCaptionContainer"] { color: __INK__ !important; }
 h1, h2, h3 { color: __INK__ !important; }
 hr { border-color: __BORDER__ !important; }
 
-[data-testid="stSidebar"] { background: __SURFACE2__; border-right: 4px solid __PRIMARY__; }
+[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child { background: __SURFACE2__ !important; }
+[data-testid="stSidebar"] { border-right: 4px solid __PRIMARY__; }
+
+/* big menu tabs in the sidebar: Feed, Reels, Friends, Chats */
+[data-testid="stSidebar"] [role="radiogroup"] { gap: 12px; }
+[data-testid="stSidebar"] [role="radiogroup"] > label {
+    width: 100%; padding: 16px 20px; border-radius: 20px; cursor: pointer;
+    background: __SURFACE__; border: 2px solid __BORDER__; box-shadow: 0 4px 0 __SHADOW__;
+    transition: transform .12s ease, border-color .12s ease;
+}
+[data-testid="stSidebar"] [role="radiogroup"] > label > div:first-child:not([data-testid="stMarkdownContainer"]) { display: none; }
+[data-testid="stSidebar"] [role="radiogroup"] > label p { font-size: 1.4rem !important; font-weight: 700; margin: 0; line-height: 1.3; }
+[data-testid="stSidebar"] [role="radiogroup"] > label:hover { border-color: __PRIMARY__; transform: translateX(4px); }
+[data-testid="stSidebar"] [role="radiogroup"] > label:has(input:checked) {
+    background: linear-gradient(90deg, __BTN1__, __BTN2__); border-color: transparent;
+}
+[data-testid="stSidebar"] [role="radiogroup"] > label:has(input:checked) p { color: #fff !important; }
 
 /* buttons */
 .stButton > button, .stFormSubmitButton > button {
@@ -138,7 +154,7 @@ hr { border-color: __BORDER__ !important; }
     background: linear-gradient(90deg, __BTN1__, __BTN2__); border: none; color: #fff;
 }
 .stButton > button[kind="primary"]:hover, .stFormSubmitButton > button:hover { background: linear-gradient(90deg, __HOV1__, __HOV2__); color: #fff; }
-.stButton > button p, .stFormSubmitButton > button p { color: inherit; }
+.stButton > button p, .stFormSubmitButton > button p { color: inherit !important; }
 [data-testid="stFileUploaderDropzone"] button {
     background: __SURFACE__; border: 2px solid __OUTLINE__; border-radius: 999px;
 }
@@ -163,7 +179,7 @@ video { border-radius: 18px; max-height: 68vh; background: #000; }
 
 /* tabs on the login page */
 button[data-baseweb="tab"] { font-weight: 700; font-size: 1.05rem; }
-button[data-baseweb="tab"][aria-selected="true"] { color: __PRIMARY__; }
+button[data-baseweb="tab"][aria-selected="true"], button[data-baseweb="tab"][aria-selected="true"] p { color: __PRIMARY__ !important; }
 [data-baseweb="tab-highlight"] { background-color: __PRIMARY__ !important; height: 4px !important; border-radius: 4px; }
 
 /* chat bubbles */
@@ -420,6 +436,7 @@ def cb_save_theme():
     else:
         value = choice
     run("UPDATE users SET theme = ? WHERE username = ?", (value, me))
+    st.toast(f"Theme saved: {choice}", icon="🎨")
 
 
 # --- messages ---
