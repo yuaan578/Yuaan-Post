@@ -5,6 +5,7 @@ import os
 import re
 import html
 import base64
+import io
 import random
 import requests
 from datetime import datetime, timedelta
@@ -194,10 +195,8 @@ button[data-baseweb="tab"][aria-selected="true"], button[data-baseweb="tab"][ari
 .yp-banner-title { font-size: 2.4rem; font-weight: 800; line-height: 1.05; color: #fff; }
 .yp-banner-sub { font-size: 1.05rem; margin-top: 6px; color: #fff; opacity: .95; }
 
-/* photos and videos keep their own shape: portrait stays portrait, landscape stays landscape, nothing is cropped or stretched */
-[data-testid="stImage"], [data-testid="stVideo"] { display: flex; justify-content: center; }
-[data-testid="stImage"] img { width: auto !important; height: auto !important; max-width: 100%; max-height: 75vh; border-radius: 16px; }
-[data-testid="stVideo"] video { width: auto !important; height: auto !important; max-width: 100%; max-height: 75vh; background: #000; border-radius: 16px; }
+/* videos: always shown whole (letterboxed if needed), never taller than the screen */
+[data-testid="stVideo"] video { width: 100%; max-height: 75vh; object-fit: contain; background: #000; border-radius: 16px; }
 
 @media (prefers-reduced-motion: reduce) { .stButton > button, .stFormSubmitButton > button { transition: none; } }
 """
@@ -335,6 +334,73 @@ def avatar_html(username, size=40):
     ring = f"linear-gradient(45deg, {acc[3]}, {acc[0]}, {acc[1]})"
     return (f'<div style="padding:3px;border-radius:50%;background:{ring};display:inline-flex;flex-shrink:0;">'
             f'<div style="padding:2px;border-radius:50%;background:{T["surface"]};display:flex;">{face}</div></div>')
+
+
+@st.cache_data(show_spinner=False)
+def _display_b64(path, side=1400):
+    """Upright, web-sized copy of a photo (fixes sideways phone photos). Returns base64 JPEG."""
+    img = ImageOps.exif_transpose(Image.open(path))
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[-1])
+        img = bg
+    else:
+        img = img.convert("RGB")
+    img.thumbnail((side, side))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def show_image(path):
+    """Portrait photos stay portrait, landscape stay landscape. Nothing is cropped or stretched."""
+    try:
+        data = _display_b64(path)
+    except Exception:
+        st.image(path, use_container_width=True)
+        return
+    st.markdown(f'<img src="data:image/jpeg;base64,{data}" style="display:block;margin:6px auto;max-width:100%;'
+                f'max-height:75vh;width:auto;height:auto;border-radius:16px;">', unsafe_allow_html=True)
+
+
+def show_media(rows):
+    """rows = [(file_path, file_type), ...]. One photo: shown whole. Several: Facebook-style grid with +N on the last tile."""
+    items = [(p, t) for p, t in rows if os.path.exists(p)]
+    images = [p for p, t in items if "video" not in t]
+    videos = [p for p, t in items if "video" in t]
+
+    if len(images) == 1:
+        show_image(images[0])
+    elif len(images) > 1:
+        n = len(images)
+        shown = images[:4]
+        cells = []
+        for i, path in enumerate(shown):
+            try:
+                src = f"data:image/jpeg;base64,{_display_b64(path, 800)}"
+            except Exception:
+                continue
+            if n == 3 and i == 0:
+                ratio, span = "16 / 10", "grid-column:1 / -1;"
+            elif n == 2:
+                ratio, span = "3 / 4", ""
+            else:
+                ratio, span = "1 / 1", ""
+            extra = ""
+            if i == 3 and n > 4:
+                extra = ('<div style="position:absolute;inset:0;background:rgba(0,0,0,.55);color:#fff;display:flex;'
+                         f'align-items:center;justify-content:center;font-size:2.4rem;font-weight:800;">+{n - 4}</div>')
+            cells.append(f'<div style="position:relative;aspect-ratio:{ratio};{span}overflow:hidden;">'
+                         f'<img src="{src}" style="width:100%;height:100%;object-fit:cover;display:block;">{extra}</div>')
+        st.markdown('<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;border-radius:16px;overflow:hidden;margin:6px 0;">'
+                    + "".join(cells) + "</div>", unsafe_allow_html=True)
+        with st.expander(f"📷 See all {n} photos"):
+            for path in images:
+                show_image(path)
+
+    for path in videos:
+        st.video(path)
 
 
 def person_html(username, size=44, subtitle=None):
@@ -995,7 +1061,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v15")
+    st.caption("Design v17")
 
 # ------------------------------------------
 # PAGE: Feed
@@ -1055,12 +1121,7 @@ if st.session_state.page == "feed":
             friend_button(h_right, current_user, author_username, f"postfriend_{post_id}")
             st.markdown(f'<div style="white-space: pre-wrap; margin: 10px 0;">{html.escape(note)}</div>', unsafe_allow_html=True)
 
-            for file_path, ftype in media_rows:
-                if os.path.exists(file_path):
-                    if "video" in ftype:
-                        st.video(file_path)
-                    else:
-                        st.image(file_path, use_container_width=True)
+            show_media(media_rows)
 
             post_actions(post_id, author_username, current_user, "feed")
 
@@ -1278,12 +1339,7 @@ elif st.session_state.page == "profile":
                 with st.container(border=True):
                     st.caption(f"🕒 {datetime.fromisoformat(p_created).strftime('%d %b %Y, %H:%M')}")
                     st.markdown(f'<div style="white-space: pre-wrap; margin: 6px 0;">{html.escape(p_note)}</div>', unsafe_allow_html=True)
-                    for f_path, f_type in run("SELECT file_path, file_type FROM media WHERE post_id = ? ORDER BY position", (p_id,), "all"):
-                        if os.path.exists(f_path):
-                            if "video" in f_type:
-                                st.video(f_path)
-                            else:
-                                st.image(f_path, use_container_width=True)
+                    show_media(run("SELECT file_path, file_type FROM media WHERE post_id = ? ORDER BY position", (p_id,), "all"))
                     post_actions(p_id, target, current_user, "prof", show_profile=False)
         with tab_reels:
             their_reels = [r for r in get_reels() if r[1] == target][:10]
