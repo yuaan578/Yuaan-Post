@@ -5,6 +5,7 @@ import os
 import re
 import html
 import base64
+import random
 from datetime import datetime, timedelta
 from PIL import Image, ImageOps
 
@@ -85,6 +86,7 @@ def make_theme(bg, primary, secondary, ink=None, accents=None):
             "reels": (d(accents[1]), d(accents[0])),
             "friends": (d(accents[2]), d(accents[1])),
             "chats": (d(accents[3]), d(accents[0])),
+            "yuaan": (d(accents[2]), d(accents[3], 0.24)),
         },
     }
 
@@ -128,20 +130,17 @@ hr { border-color: __BORDER__ !important; }
 [data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child { background: __SURFACE2__ !important; }
 [data-testid="stSidebar"] { border-right: 4px solid __PRIMARY__; }
 
-/* big menu tabs in the sidebar: Feed, Reels, Friends, Chats */
-[data-testid="stSidebar"] [role="radiogroup"] { gap: 12px; }
-[data-testid="stSidebar"] [role="radiogroup"] > label {
-    width: 100%; padding: 16px 20px; border-radius: 20px; cursor: pointer;
-    background: __SURFACE__; border: 2px solid __BORDER__; box-shadow: 0 4px 0 __SHADOW__;
-    transition: transform .12s ease, border-color .12s ease;
+/* very big menu buttons in the sidebar: Feed, Reels, Friends, Chats */
+section[data-testid="stSidebar"][aria-expanded="true"] { width: 360px !important; min-width: 360px !important; }
+[data-testid="stSidebar"] .stButton > button {
+    min-height: 110px; border-radius: 30px; box-shadow: 0 8px 0 __SHADOW__;
 }
-[data-testid="stSidebar"] [role="radiogroup"] > label > div:first-child:not([data-testid="stMarkdownContainer"]) { display: none; }
-[data-testid="stSidebar"] [role="radiogroup"] > label p { font-size: 1.4rem !important; font-weight: 700; margin: 0; line-height: 1.3; }
-[data-testid="stSidebar"] [role="radiogroup"] > label:hover { border-color: __PRIMARY__; transform: translateX(4px); }
-[data-testid="stSidebar"] [role="radiogroup"] > label:has(input:checked) {
-    background: linear-gradient(90deg, __BTN1__, __BTN2__); border-color: transparent;
-}
-[data-testid="stSidebar"] [role="radiogroup"] > label:has(input:checked) p { color: #fff !important; }
+[data-testid="stSidebar"] .stButton > button p { font-size: 2.2rem !important; font-weight: 800; line-height: 1.15; }
+[data-testid="stSidebar"] .stButton > button:hover { transform: translateY(-3px); }
+/* buttons inside the settings boxes stay normal size */
+[data-testid="stSidebar"] [data-testid="stExpander"] .stButton > button { min-height: 0; border-radius: 999px; box-shadow: none; }
+[data-testid="stSidebar"] [data-testid="stExpander"] .stButton > button p { font-size: 1rem !important; font-weight: 700; }
+[data-testid="stSidebar"] [data-testid="stExpander"] .stButton > button:hover { transform: translateY(-2px); }
 
 /* buttons */
 .stButton > button, .stFormSubmitButton > button {
@@ -250,6 +249,8 @@ def init_db():
     conn.execute('''CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, sender TEXT NOT NULL, receiver TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, is_read INTEGER NOT NULL DEFAULT 0)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS reels (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, video_path TEXT NOT NULL, caption TEXT NOT NULL, created_at TEXT NOT NULL)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS reel_likes (reel_id TEXT NOT NULL, username TEXT NOT NULL, PRIMARY KEY (reel_id, username))''')
+    # each person's private conversation with Yuaan AI
+    conn.execute('''CREATE TABLE IF NOT EXISTS ai_messages (id TEXT PRIMARY KEY, username TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)''')
     # add new columns to an existing users table (safe to run every time)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(users)")]
     if "avatar_path" not in cols:
@@ -419,6 +420,10 @@ def cb_sign_out():
         st.session_state.pop(key, None)
 
 
+def cb_go_page(page):
+    st.session_state.page = page
+
+
 def cb_open_chat(other):
     st.session_state.page = "chats"
     st.session_state.chat_with = other
@@ -507,6 +512,179 @@ def cb_delete_reel(reel_id, me):
         st.session_state.reel_idx = 0
 
 
+# --- Yuaan: a built-in helper. It needs no account, no key and no outside AI service. ---
+AI_MAX_CHARS = 500   # longest message allowed
+ASK_TOPIC = "What's the post about?"
+
+CAPTION_TEMPLATES = [
+    "{T} mood, loading... ✨",
+    "Today's plot: {t}.",
+    "No filter needed for {t}.",
+    "{T}, but make it unforgettable.",
+    "Good vibes only: {t} edition.",
+    "Because {t} deserves a post.",
+    "Living for {t} 💜",
+    "Little moments, big feelings: {t}.",
+    "POV: {t} and zero worries.",
+    "{T}. That's the whole caption.",
+]
+
+POST_IDEAS = [
+    "Show what's on your desk or table right now.",
+    "Post your favourite snack and ask friends to rate it from 1 to 10.",
+    "Share one thing that made you smile today.",
+    "Take a photo of the sky where you are.",
+    "Ask your friends: what song is on repeat for you this week?",
+    "Share a then-and-now photo of something, like a place, a pet or a drawing.",
+    "Recommend a game, show or book and say why you like it.",
+    "Post a would-you-rather question and let friends answer in the comments.",
+    "Show something you made, even if it's not finished.",
+    "Share your three favourite apps and ask friends for theirs.",
+    "Post a photo of your view right now.",
+    "Tell a short story about the best thing that happened this week.",
+    "Share a tip that you wish you knew earlier.",
+    "Ask friends for one thing they're looking forward to.",
+    "Post your morning or evening routine in a few photos.",
+]
+
+REEL_IDEAS = [
+    "A 10-second 'day in my life' with a few quick clips.",
+    "Teach one quick skill, like a drawing trick or a handshake, in under 15 seconds.",
+    "Slowly pan across a view you love.",
+    "A time-lapse of cooking, cleaning or drawing something.",
+    "Say hello with your pet or a plant.",
+    "Show a before and after of something you fixed or made.",
+    "A short 'what's in my bag' reel.",
+    "Film a small challenge and tag a friend to try it.",
+    "Record a funny moment from your week (with permission from anyone in it).",
+    "A quick tour of your favourite spot.",
+]
+
+JOKES = [
+    "Why did the phone go to school? To get smarter!",
+    "Why don't skeletons fight each other? They don't have the guts.",
+    "What do you call a fake noodle? An impasta.",
+    "Why did the scarecrow win an award? He was outstanding in his field.",
+    "What's a computer's favourite snack? Microchips.",
+    "Why was the math book sad? It had too many problems.",
+    "Why did the bicycle fall over? It was two tired.",
+    "How does the moon cut its hair? Eclipse it.",
+    "What's orange and sounds like a parrot? A carrot.",
+    "Why can't you trust stairs? They're always up to something.",
+    "What do you call a sleeping dinosaur? A dino-snore.",
+    "Why did the cookie go to the doctor? It felt crummy.",
+]
+
+APP_HELP = [  # (words to look for, answer). The first match wins, so order matters.
+    (("delete", "remove"), "You can delete your own reels with the 🗑️ Delete button on the 🎬 Reels page. Deleting posts isn't available yet."),
+    (("sign out", "log out", "logout"), "Open ⚙️ Profile Settings in the left sidebar. The Sign out button is at the bottom of that box."),
+    (("password",), "Passwords can't be changed inside the app yet."),
+    (("friend", "friends", "follow"), "Open 👥 Friends, search for their username and tap ➕ Add friend. You can also tap Add friend next to anyone's post or reel. When they accept, you can chat in 💬 Chats."),
+    (("profile picture", "profile pic", "avatar", "pfp"), "Open ⚙️ Profile Settings in the left sidebar, choose a picture, then tap Save picture."),
+    (("theme", "themes", "colour", "colours", "color", "colors", "dark mode"), "Open 🎨 Theme in the left sidebar. Pick a preset, or choose Custom to pick your own three colours. It saves to your account."),
+    (("reel", "reels"), "Open 🎬 Reels, tap ➕ Upload a reel, choose an MP4 video (up to 100 MB) and tap Share reel. Use the Previous and Next buttons to move between reels, and tap 🤍 to like."),
+    (("comment", "comments"), "Under any post or reel, open the 💬 comment box, type your comment and tap send."),
+    (("like", "likes"), "On the 🎬 Reels page, tap the 🤍 button under a reel to like it. Tap it again to unlike."),
+    (("post", "posts", "feed"), "On 🏠 Feed, write something in the box, add photos or videos if you like, then tap Post!"),
+    (("chat", "chats", "message", "messages", "dm"), "💬 Chats works with friends. Add someone in 👥 Friends first, then pick them in Chats and type your message."),
+]
+
+CRISIS_WORDS = ("kill myself", "suicide", "want to die", "end my life", "hurt myself", "self harm", "self-harm")
+LOW_WORDS = ("sad", "lonely", "depressed", "stressed", "anxious", "upset", "bad day", "miserable")
+
+CRISIS_REPLY = ("I'm really sorry you're hurting. I'm only a simple helper inside an app, and you deserve real support right now. "
+                "Please tell a trusted adult or someone close to you straight away. If you're in danger, contact your local "
+                "emergency number or a crisis line in your country. You don't have to go through this alone.")
+LOW_REPLY = ("I'm sorry you're having a rough time. I'm only a simple helper, so I can't help the way a person can. "
+             "Try talking to a friend (you can message them in 💬 Chats) or someone you trust, like family or a teacher. "
+             "If you ever feel unsafe or think about hurting yourself, tell a trusted adult right away.")
+CAN_DO_REPLY = ("Here's what I can do:\n\n"
+                "- **Captions:** try \"caption for beach day\"\n"
+                "- **Post ideas** and **reel ideas**\n"
+                "- **Jokes:** try \"tell me a joke\"\n"
+                "- **App help:** try \"how do I add a friend?\"\n\n"
+                "I'm a built-in helper, not a full AI, so I work best with these topics.")
+FALLBACK_REPLY = ("I'm not sure about that one. I'm a built-in helper, so I work best with captions (try \"caption for my dog\"), "
+                  "post ideas, reel ideas, jokes and app help (try \"how do I add a friend?\").")
+
+
+def _has(text, *phrases):
+    return any(re.search(r"\b" + re.escape(p) + r"\b", text) for p in phrases)
+
+
+def _captions(topic):
+    topic = re.sub(r"[*_`#<>\[\]{}]", "", topic).strip()
+    topic = re.sub(r"[.!?\s]+$", "", topic)[:60]
+    if not topic:
+        return f"Happy to help with a caption! {ASK_TOPIC} For example: beach day, my dog, birthday."
+    cap = topic[:1].upper() + topic[1:]
+    picks = random.sample(CAPTION_TEMPLATES, 3)
+    lines = "\n".join(f"- {p.format(t=topic, T=cap)}" for p in picks)
+    return f"Here are some caption ideas for **{topic}**:\n\n{lines}\n\nWant more? Just ask again."
+
+
+def _ideas(title, items, count=4):
+    lines = "\n".join(f"- {i}" for i in random.sample(items, count))
+    return f"{title}\n\n{lines}\n\nAsk again for a fresh set."
+
+
+def yuaan_reply(text, name, last_bot=""):
+    """Works out what the person wants and answers from built-in tips. Returns the reply text."""
+    t = text.lower().strip()
+
+    # Yuaan just asked what the post is about, so a short answer is the topic
+    if ASK_TOPIC in last_bot and len(t) <= 80 and not _has(t, "joke", "idea", "ideas", "how", "help", "thanks", "thank you", "bye", "reel"):
+        return _captions(text)
+
+    if any(w in t for w in CRISIS_WORDS):
+        return CRISIS_REPLY
+
+    if _has(t, "caption", "captions"):
+        m = re.search(r"captions?\s*(?:ideas?|suggestions?)?\s*(?:for|about|on|of|:)?\s*(.*)$", text, re.I)
+        topic = re.sub(r"\b(please|pls|thanks)\b", "", m.group(1) if m else "", flags=re.I).strip(" .!?,:;-")
+        return _captions(topic)
+
+    if _has(t, "how", "where", "can i", "help me", "steps", "upload"):
+        for words, answer in APP_HELP:
+            if _has(t, *words):
+                return answer
+
+    if _has(t, "reel", "reels") and _has(t, "idea", "ideas", "what", "film", "make", "inspiration", "should"):
+        return _ideas("Reel ideas for you:", REEL_IDEAS)
+    if _has(t, "idea", "ideas", "inspiration", "what should i post", "what to post", "post something"):
+        return _ideas("Post ideas for you:", POST_IDEAS)
+    if _has(t, "joke", "jokes", "funny", "laugh"):
+        return random.choice(JOKES)
+    if _has(t, "bored", "boring"):
+        return "Bored? Try posting a photo of your view, uploading a quick reel, or sending a message to a friend in 💬 Chats."
+    if any(_has(t, w) for w in LOW_WORDS):
+        return LOW_REPLY
+    if _has(t, "what can you do", "help", "commands", "features", "menu"):
+        return CAN_DO_REPLY
+    if _has(t, "who are you", "your name", "are you an ai", "are you ai", "are you real", "are you a bot", "are you human"):
+        return ("I'm Yuaan, the helper inside Yuaan Post. I'm not a person, and I'm not a big AI chatbot either. "
+                "I run on built-in tips and templates, so I'm best at captions, post and reel ideas, jokes and app help.")
+    if _has(t, "how are you", "how r u", "what's up", "whats up", "sup"):
+        return random.choice([f"I'm good, {name}! Want a caption, a post idea or a joke?",
+                              "Doing great! What are we posting today?"])
+    if "ขอบคุณ" in t or _has(t, "thanks", "thank you", "thx", "ty"):
+        return random.choice(["Anytime! 💜", "You're welcome!", "Happy to help!"])
+    if _has(t, "bye", "goodbye", "see you", "cya", "goodnight"):
+        return "See you soon! 👋"
+    if "สวัสดี" in t or _has(t, "hi", "hello", "hey", "yo", "hiya"):
+        return random.choice([f"Hey {name}! 👋 Want caption ideas, a post idea or a joke?",
+                              f"Hi {name}! What can I help with today?"])
+    return FALLBACK_REPLY
+
+
+def cb_clear_ai(username):
+    run("DELETE FROM ai_messages WHERE username = ?", (username,))
+
+
+def cb_yuaan_quick(text):
+    st.session_state.yuaan_quick = text
+
+
 # ==========================================
 # 5. Login / Sign up
 # ==========================================
@@ -584,12 +762,16 @@ PAGE_LABELS = {
     "reels": "🎬 Reels",
     "friends": "👥 Friends" + (f" ({pending_count} new)" if pending_count else ""),
     "chats": "💬 Chats" + (f" ({unread_count} new)" if unread_count else ""),
+    "yuaan": "🤖 Yuaan",
 }
 
 with st.sidebar:
     st.markdown(person_html(current_user, size=56, subtitle="Welcome to Yuaan Post"), unsafe_allow_html=True)
     st.write("")
-    st.radio("Go to", list(PAGE_LABELS.keys()), format_func=lambda k: PAGE_LABELS[k], key="page", label_visibility="collapsed")
+    for page_key, page_label in PAGE_LABELS.items():
+        st.button(page_label, key=f"nav_{page_key}", use_container_width=True,
+                  type="primary" if st.session_state.page == page_key else "secondary",
+                  on_click=cb_go_page, args=(page_key,))
 
     st.divider()
     with st.expander("⚙️ Profile Settings"):
@@ -609,6 +791,9 @@ with st.sidebar:
                 run("UPDATE users SET display_name = ? WHERE username = ?", (new_display_name, current_user))
                 st.rerun()
 
+        st.divider()
+        st.button("Sign out", on_click=cb_sign_out)
+
     with st.expander("🎨 Theme"):
         saved = get_theme_value(current_user)
         saved_name = "Custom" if saved.startswith("custom|") else (saved if saved in THEMES else "Pop")
@@ -627,7 +812,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.button("Sign out", on_click=cb_sign_out)
+    st.caption("Design v8")
 
 # ------------------------------------------
 # PAGE: Feed
@@ -868,3 +1053,43 @@ elif st.session_state.page == "chats":
         if prompt and prompt.strip():
             send_message(current_user, other, prompt.strip())
             st.rerun()
+
+# ------------------------------------------
+# PAGE: Yuaan (built-in helper)
+# ------------------------------------------
+elif st.session_state.page == "yuaan":
+    banner("Yuaan", "Your built-in helper for captions, ideas and app tips.", "yuaan")
+
+    my_avatar = get_avatar_path(current_user) or "👤"
+    history = run("SELECT role, content FROM ai_messages WHERE username = ? ORDER BY created_at ASC, rowid ASC",
+                  (current_user,), "all")
+
+    quick = [("✍️ Caption ideas", "caption ideas"), ("💡 Post ideas", "post ideas"), ("🎬 Reel ideas", "reel ideas"),
+             ("😂 Joke", "tell me a joke"), ("❓ What can you do?", "what can you do?")]
+    for row in (quick[:3], quick[3:]):
+        for col, (label, text) in zip(st.columns(len(row)), row):
+            col.button(label, key=f"yuaan_quick_{text}", on_click=cb_yuaan_quick, args=(text,), use_container_width=True)
+
+    if history:
+        st.button("🗑️ Clear chat", key="ai_clear", on_click=cb_clear_ai, args=(current_user,))
+    else:
+        st.caption("Say hi, or tap a button above. Yuaan is a built-in helper, not a full AI, so it works best with these topics.")
+
+    for role, content in history[-100:]:
+        with st.chat_message(role, avatar="🤖" if role == "assistant" else my_avatar):
+            st.write(content)
+
+    typed = st.chat_input("Message Yuaan...")
+    prompt = typed or st.session_state.pop("yuaan_quick", None)
+    if prompt and prompt.strip():
+        text = prompt.strip()[:AI_MAX_CHARS]
+        last_bot = history[-1][1] if history and history[-1][0] == "assistant" else ""
+        reply = yuaan_reply(text, display_name, last_bot)
+        with st.chat_message("user", avatar=my_avatar):
+            st.write(text)
+        with st.chat_message("assistant", avatar="🤖"):
+            st.write(reply)
+        run("INSERT INTO ai_messages (id, username, role, content, created_at) VALUES (?, ?, 'user', ?, ?)",
+            (str(uuid.uuid4()), current_user, text, datetime.now().isoformat()))
+        run("INSERT INTO ai_messages (id, username, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)",
+            (str(uuid.uuid4()), current_user, reply, datetime.now().isoformat()))
