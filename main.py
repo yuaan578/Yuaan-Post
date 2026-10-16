@@ -662,7 +662,7 @@ def _fmt_num(v):
 def try_math(text):
     """Returns a reply if the message is a simple sum, otherwise None."""
     t = text.lower().strip().rstrip("?=! .")
-    t = re.sub(r"^(what is|what's|whats|calculate|calc|solve|compute|how much is|tell me)\s+", "", t).strip()
+    t = re.sub(r"^(what is|what's|whats|what|calculate|calc|solve|compute|work out|how much is|how much|tell me|answer)\s+(?:is\s+)?", "", t).strip()
     if re.fullmatch(r"\d{1,4}[-/]\d{1,2}[-/]\d{1,4}", t):
         return None  # looks like a date
     m = re.fullmatch(r"([\d.,]+)\s*%\s*of\s*([\d.,]+)", t)
@@ -876,7 +876,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v9")
+    st.caption("Design v10")
 
 # ------------------------------------------
 # PAGE: Feed
