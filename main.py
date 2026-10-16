@@ -602,10 +602,11 @@ CAN_DO_REPLY = ("Here's what I can do:\n\n"
                 "- **Captions:** try \"caption for beach day\"\n"
                 "- **Post ideas** and **reel ideas**\n"
                 "- **Jokes:** try \"tell me a joke\"\n"
+                "- **Simple maths:** try \"12 x 4\" or \"20% of 50\"\n"
                 "- **App help:** try \"how do I add a friend?\"\n\n"
                 "I'm a built-in helper, not a full AI, so I work best with these topics.")
 FALLBACK_REPLY = ("I'm not sure about that one. I'm a built-in helper, so I work best with captions (try \"caption for my dog\"), "
-                  "post ideas, reel ideas, jokes and app help (try \"how do I add a friend?\").")
+                  "post ideas, reel ideas, jokes, simple maths (try \"12 x 4\") and app help (try \"how do I add a friend?\").")
 
 
 def _has(text, *phrases):
@@ -628,6 +629,65 @@ def _ideas(title, items, count=4):
     return f"{title}\n\n{lines}\n\nAsk again for a fresh set."
 
 
+def _safe_eval(node):
+    """Evaluates only numbers and + - * / ** %, nothing else, so it is safe on typed text."""
+    import ast, operator
+    ops = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+           ast.Div: operator.truediv, ast.Mod: operator.mod, ast.Pow: operator.pow}
+    if isinstance(node, ast.Expression):
+        return _safe_eval(node.body)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        v = _safe_eval(node.operand)
+        return -v if isinstance(node.op, ast.USub) else v
+    if isinstance(node, ast.BinOp) and type(node.op) in ops:
+        a, b = _safe_eval(node.left), _safe_eval(node.right)
+        if isinstance(node.op, ast.Pow) and (abs(b) > 100 or abs(a) > 1e6):
+            raise ValueError("too big")
+        return ops[type(node.op)](a, b)
+    raise ValueError("not math")
+
+
+def _fmt_num(v):
+    if isinstance(v, float):
+        if v != v or v in (float("inf"), float("-inf")):
+            raise ValueError("bad")
+        v = round(v, 6)
+        if v == int(v) and abs(v) < 1e15:
+            v = int(v)
+    return f"{v:,}" if isinstance(v, int) and abs(v) >= 10000 else str(v)
+
+
+def try_math(text):
+    """Returns a reply if the message is a simple sum, otherwise None."""
+    t = text.lower().strip().rstrip("?=! .")
+    t = re.sub(r"^(what is|what's|whats|calculate|calc|solve|compute|how much is|tell me)\s+", "", t).strip()
+    if re.fullmatch(r"\d{1,4}[-/]\d{1,2}[-/]\d{1,4}", t):
+        return None  # looks like a date
+    m = re.fullmatch(r"([\d.,]+)\s*%\s*of\s*([\d.,]+)", t)
+    try:
+        if m:
+            a, b = float(m.group(1).replace(",", "")), float(m.group(2).replace(",", ""))
+            return f"{m.group(1)}% of {m.group(2)} = **{_fmt_num(a / 100 * b)}**"
+        m = re.fullmatch(r"(?:square root|sqrt)\s*(?:of)?\s*([\d.]+)", t)
+        if m:
+            return f"The square root of {m.group(1)} is **{_fmt_num(float(m.group(1)) ** 0.5)}**"
+        e = t
+        for w, s in ((" divided by ", "/"), (" multiplied by ", "*"), (" times ", "*"), (" plus ", "+"),
+                     (" minus ", "-"), (" to the power of ", "**"), (" mod ", "%")):
+            e = e.replace(w, s)
+        e = e.replace("x", "*").replace("×", "*").replace("÷", "/").replace("^", "**").replace(",", "")
+        if not re.fullmatch(r"[\d+\-*/().% ]+", e) or not re.search(r"\d\s*[-+*/%]+\s*[\d(.-]", e) or not re.search(r"\d", e):
+            return None
+        return f"{text.strip().rstrip('?=! .')} = **{_fmt_num(_safe_eval(compile(e, '<m>', 'eval', 0x400)))}**"
+    except ZeroDivisionError:
+        return "I can't divide by zero. Nobody can! 😄"
+    except Exception:
+        return None
+
+
+
 def yuaan_reply(text, name, last_bot=""):
     """Works out what the person wants and answers from built-in tips. Returns the reply text."""
     t = text.lower().strip()
@@ -638,6 +698,10 @@ def yuaan_reply(text, name, last_bot=""):
 
     if any(w in t for w in CRISIS_WORDS):
         return CRISIS_REPLY
+
+    sums = try_math(text)
+    if sums:
+        return sums
 
     if _has(t, "caption", "captions"):
         m = re.search(r"captions?\s*(?:ideas?|suggestions?)?\s*(?:for|about|on|of|:)?\s*(.*)$", text, re.I)
@@ -812,7 +876,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v8")
+    st.caption("Design v9")
 
 # ------------------------------------------
 # PAGE: Feed
