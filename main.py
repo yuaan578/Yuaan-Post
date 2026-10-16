@@ -770,6 +770,7 @@ def ask_gemini(turns, name):
     """turns = [(role, text), ...] with role 'user' or 'assistant'. Returns text, or None if anything goes wrong."""
     key = get_secret("GEMINI_API_KEY")
     if not key:
+        st.session_state.yuaan_status = "No GEMINI_API_KEY found in this app's Secrets."
         return None
     contents = []
     for role, text in turns:
@@ -782,6 +783,7 @@ def ask_gemini(turns, name):
         contents.pop(0)
     if not contents:
         return None
+    st.session_state.yuaan_status = ""
     try:
         resp = requests.post(
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent",
@@ -790,10 +792,18 @@ def ask_gemini(turns, name):
                   "contents": contents, "generationConfig": {"maxOutputTokens": 400}},
             timeout=20)
         if resp.status_code != 200:
+            try:
+                why = resp.json()["error"]["message"][:200]
+            except Exception:
+                why = ""
+            st.session_state.yuaan_status = f"Gemini said no (code {resp.status_code}). {why}"
             return None
         out = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        if not out:
+            st.session_state.yuaan_status = "Gemini sent an empty answer."
         return out or None
-    except Exception:
+    except Exception as e:
+        st.session_state.yuaan_status = f"Could not reach Gemini ({type(e).__name__})."
         return None
 
 
@@ -803,6 +813,8 @@ def yuaan_answer(history, text, username, name):
     local = yuaan_reply(text, name, last_bot)
     t = text.lower()
     if try_math(text) or any(w in t for w in CRISIS_WORDS) or not get_secret("GEMINI_API_KEY"):
+        if not get_secret("GEMINI_API_KEY"):
+            st.session_state.yuaan_status = "No GEMINI_API_KEY found in this app's Secrets."
         return local
     if ai_used_today(username) >= AI_DAILY_LIMIT:
         return local
@@ -945,7 +957,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v11")
+    st.caption("Design v12")
 
 # ------------------------------------------
 # PAGE: Feed
@@ -1225,3 +1237,6 @@ elif st.session_state.page == "yuaan":
             (str(uuid.uuid4()), current_user, text, datetime.now().isoformat()))
         run("INSERT INTO ai_messages (id, username, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)",
             (str(uuid.uuid4()), current_user, reply, datetime.now().isoformat()))
+
+    if st.session_state.get("yuaan_status"):
+        st.warning("Real AI is off for the last message. " + st.session_state.yuaan_status)
