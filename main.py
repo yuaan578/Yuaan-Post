@@ -6,6 +6,7 @@ import re
 import html
 import base64
 import random
+import requests
 from datetime import datetime, timedelta
 from PIL import Image, ImageOps
 
@@ -741,6 +742,74 @@ def yuaan_reply(text, name, last_bot=""):
     return FALLBACK_REPLY
 
 
+# --- Optional real AI (Google Gemini). Only used if a key is saved in Streamlit secrets. ---
+AI_DAILY_LIMIT = 40   # Gemini messages per person per day; after that Yuaan uses the built-in replies
+AI_HISTORY = 20
+YUAAN_SYSTEM = ("You are Yuaan, a friendly helper inside a small social app called Yuaan Post (feed, reels, friends, chats). "
+                "Keep replies short, kind and safe for all ages. Help with captions, post ideas, simple questions and app tips. "
+                "If someone seems upset or in danger, be gentle and tell them to talk to a trusted adult or local emergency services. "
+                "Never ask for personal details like addresses, passwords or phone numbers.")
+
+
+def get_secret(name):
+    try:
+        v = st.secrets.get(name)
+    except Exception:
+        v = None
+    return v or os.environ.get(name)
+
+
+def ai_used_today(username):
+    today = datetime.now().strftime("%Y-%m-%d")
+    row = run("SELECT COUNT(*) FROM ai_messages WHERE username = ? AND role = 'user' AND created_at >= ?",
+              (username, today), "one")
+    return row[0] if row else 0
+
+
+def ask_gemini(turns, name):
+    """turns = [(role, text), ...] with role 'user' or 'assistant'. Returns text, or None if anything goes wrong."""
+    key = get_secret("GEMINI_API_KEY")
+    if not key:
+        return None
+    contents = []
+    for role, text in turns:
+        r = "user" if role == "user" else "model"
+        if contents and contents[-1]["role"] == r:
+            contents[-1]["parts"][0]["text"] += "\n" + text
+        else:
+            contents.append({"role": r, "parts": [{"text": text}]})
+    while contents and contents[0]["role"] != "user":
+        contents.pop(0)
+    if not contents:
+        return None
+    try:
+        resp = requests.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent",
+            headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+            json={"system_instruction": {"parts": [{"text": YUAAN_SYSTEM + f" The person's name is {name}."}]},
+                  "contents": contents, "generationConfig": {"maxOutputTokens": 400}},
+            timeout=20)
+        if resp.status_code != 200:
+            return None
+        out = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return out or None
+    except Exception:
+        return None
+
+
+def yuaan_answer(history, text, username, name):
+    """Maths and safety replies stay built-in. Everything else tries Gemini if a key exists, else built-in."""
+    last_bot = history[-1][1] if history and history[-1][0] == "assistant" else ""
+    local = yuaan_reply(text, name, last_bot)
+    t = text.lower()
+    if try_math(text) or any(w in t for w in CRISIS_WORDS) or not get_secret("GEMINI_API_KEY"):
+        return local
+    if ai_used_today(username) >= AI_DAILY_LIMIT:
+        return local
+    turns = list(history[-AI_HISTORY:]) + [("user", text)]
+    return ask_gemini(turns, name) or local
+
+
 def cb_clear_ai(username):
     run("DELETE FROM ai_messages WHERE username = ?", (username,))
 
@@ -876,7 +945,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v10")
+    st.caption("Design v11")
 
 # ------------------------------------------
 # PAGE: Feed
@@ -1147,8 +1216,7 @@ elif st.session_state.page == "yuaan":
     prompt = typed or st.session_state.pop("yuaan_quick", None)
     if prompt and prompt.strip():
         text = prompt.strip()[:AI_MAX_CHARS]
-        last_bot = history[-1][1] if history and history[-1][0] == "assistant" else ""
-        reply = yuaan_reply(text, display_name, last_bot)
+        reply = yuaan_answer(history, text, current_user, display_name)
         with st.chat_message("user", avatar=my_avatar):
             st.write(text)
         with st.chat_message("assistant", avatar="🤖"):
