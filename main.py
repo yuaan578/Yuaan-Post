@@ -1121,7 +1121,7 @@ elif st.session_state.page == "chats":
 # ------------------------------------------
 # PAGE: Yuaan (built-in helper)
 # ------------------------------------------
-elif st.session_state.page == "Yuaan AI":
+elif st.session_state.page == "yuaan":
     banner("Yuaan", "Your built-in helper for captions, ideas and app tips.", "yuaan")
 
     my_avatar = get_avatar_path(current_user) or "👤"
