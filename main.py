@@ -353,6 +353,23 @@ def _display_b64(path, side=1400):
     return base64.b64encode(buf.getvalue()).decode()
 
 
+def cb_rotate_photo(path):
+    """Turns a photo a quarter-turn clockwise and saves it (used by the Rotate button on your own posts)."""
+    try:
+        with Image.open(path) as im:
+            fmt = im.format or "JPEG"
+            im.load()
+            img = ImageOps.exif_transpose(im)
+            img = img.rotate(-90, expand=True)
+        if fmt == "JPEG":
+            img.convert("RGB").save(path, "JPEG", quality=92)
+        else:
+            img.save(path, fmt)
+        _display_b64.clear()  # forget the old picture so the new one shows
+    except Exception:
+        st.toast("Couldn't rotate that photo", icon="⚠️")
+
+
 def show_image(path):
     """Portrait photos stay portrait, landscape stay landscape. Nothing is cropped or stretched."""
     try:
@@ -364,14 +381,19 @@ def show_image(path):
                 f'max-height:75vh;width:auto;height:auto;border-radius:16px;">', unsafe_allow_html=True)
 
 
-def show_media(rows):
+def show_media(rows, can_edit=False, key_prefix=""):
     """rows = [(file_path, file_type), ...]. One photo: shown whole. Several: Facebook-style grid with +N on the last tile."""
     items = [(p, t) for p, t in rows if os.path.exists(p)]
     images = [p for p, t in items if "video" not in t]
     videos = [p for p, t in items if "video" in t]
 
+    def rotate_button(i, path):
+        if can_edit:
+            st.button("🔄 Rotate", key=f"{key_prefix}_rot_{i}", on_click=cb_rotate_photo, args=(path,))
+
     if len(images) == 1:
         show_image(images[0])
+        rotate_button(0, images[0])
     elif len(images) > 1:
         n = len(images)
         shown = images[:4]
@@ -396,8 +418,9 @@ def show_media(rows):
         st.markdown('<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;border-radius:16px;overflow:hidden;margin:6px 0;">'
                     + "".join(cells) + "</div>", unsafe_allow_html=True)
         with st.expander(f"📷 See all {n} photos"):
-            for path in images:
+            for i, path in enumerate(images):
                 show_image(path)
+                rotate_button(i, path)
 
     for path in videos:
         st.video(path)
@@ -1061,7 +1084,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v17")
+    st.caption("Design v18")
 
 # ------------------------------------------
 # PAGE: Feed
@@ -1121,7 +1144,7 @@ if st.session_state.page == "feed":
             friend_button(h_right, current_user, author_username, f"postfriend_{post_id}")
             st.markdown(f'<div style="white-space: pre-wrap; margin: 10px 0;">{html.escape(note)}</div>', unsafe_allow_html=True)
 
-            show_media(media_rows)
+            show_media(media_rows, can_edit=(author_username == current_user), key_prefix=f"feed_{post_id}")
 
             post_actions(post_id, author_username, current_user, "feed")
 
@@ -1339,7 +1362,8 @@ elif st.session_state.page == "profile":
                 with st.container(border=True):
                     st.caption(f"🕒 {datetime.fromisoformat(p_created).strftime('%d %b %Y, %H:%M')}")
                     st.markdown(f'<div style="white-space: pre-wrap; margin: 6px 0;">{html.escape(p_note)}</div>', unsafe_allow_html=True)
-                    show_media(run("SELECT file_path, file_type FROM media WHERE post_id = ? ORDER BY position", (p_id,), "all"))
+                    show_media(run("SELECT file_path, file_type FROM media WHERE post_id = ? ORDER BY position", (p_id,), "all"),
+                               can_edit=(target == current_user), key_prefix=f"prof_{p_id}")
                     post_actions(p_id, target, current_user, "prof", show_profile=False)
         with tab_reels:
             their_reels = [r for r in get_reels() if r[1] == target][:10]
