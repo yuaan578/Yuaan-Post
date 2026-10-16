@@ -194,13 +194,10 @@ button[data-baseweb="tab"][aria-selected="true"], button[data-baseweb="tab"][ari
 .yp-banner-title { font-size: 2.4rem; font-weight: 800; line-height: 1.05; color: #fff; }
 .yp-banner-sub { font-size: 1.05rem; margin-top: 6px; color: #fff; opacity: .95; }
 
-/* photos and videos: tall (portrait) ones fit on a phone screen instead of running off the bottom */
-[data-testid="stImage"] img { width: 100%; height: auto; max-height: 78vh; object-fit: contain; border-radius: 16px; }
-[data-testid="stVideo"] video, [data-testid="stVideo"] { max-height: 78vh; }
-[data-testid="stVideo"] video { width: 100%; object-fit: contain; background: #000; border-radius: 16px; }
-@media (max-width: 640px) {
-  [data-testid="stImage"] img, [data-testid="stVideo"] video { max-height: 70vh; }
-}
+/* photos and videos keep their own shape: portrait stays portrait, landscape stays landscape, nothing is cropped or stretched */
+[data-testid="stImage"], [data-testid="stVideo"] { display: flex; justify-content: center; }
+[data-testid="stImage"] img { width: auto !important; height: auto !important; max-width: 100%; max-height: 75vh; border-radius: 16px; }
+[data-testid="stVideo"] video { width: auto !important; height: auto !important; max-width: 100%; max-height: 75vh; background: #000; border-radius: 16px; }
 
 @media (prefers-reduced-motion: reduce) { .stButton > button, .stFormSubmitButton > button { transition: none; } }
 """
@@ -998,7 +995,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v14")
+    st.caption("Design v15")
 
 # ------------------------------------------
 # PAGE: Feed
