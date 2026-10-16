@@ -194,6 +194,14 @@ button[data-baseweb="tab"][aria-selected="true"], button[data-baseweb="tab"][ari
 .yp-banner-title { font-size: 2.4rem; font-weight: 800; line-height: 1.05; color: #fff; }
 .yp-banner-sub { font-size: 1.05rem; margin-top: 6px; color: #fff; opacity: .95; }
 
+/* photos and videos: tall (portrait) ones fit on a phone screen instead of running off the bottom */
+[data-testid="stImage"] img { width: 100%; height: auto; max-height: 78vh; object-fit: contain; border-radius: 16px; }
+[data-testid="stVideo"] video, [data-testid="stVideo"] { max-height: 78vh; }
+[data-testid="stVideo"] video { width: 100%; object-fit: contain; background: #000; border-radius: 16px; }
+@media (max-width: 640px) {
+  [data-testid="stImage"] img, [data-testid="stVideo"] video { max-height: 70vh; }
+}
+
 @media (prefers-reduced-motion: reduce) { .stButton > button, .stFormSubmitButton > button { transition: none; } }
 """
 
@@ -252,8 +260,6 @@ def init_db():
     conn.execute('''CREATE TABLE IF NOT EXISTS reels (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, video_path TEXT NOT NULL, caption TEXT NOT NULL, created_at TEXT NOT NULL)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS reel_likes (reel_id TEXT NOT NULL, username TEXT NOT NULL, PRIMARY KEY (reel_id, username))''')
     # each person's private conversation with Yuaan AI
-    conn.execute('''CREATE TABLE IF NOT EXISTS follows (follower TEXT NOT NULL, followee TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (follower, followee))''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS post_likes (post_id TEXT NOT NULL, username TEXT NOT NULL, PRIMARY KEY (post_id, username))''')
     conn.execute('''CREATE TABLE IF NOT EXISTS ai_messages (id TEXT PRIMARY KEY, username TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)''')
     # add new columns to an existing users table (safe to run every time)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(users)")]
@@ -261,8 +267,6 @@ def init_db():
         conn.execute("ALTER TABLE users ADD COLUMN avatar_path TEXT")
     if "theme" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN theme TEXT")
-    if "bio" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN bio TEXT")
     conn.commit()
     conn.close()
 
@@ -414,61 +418,7 @@ def friend_button(container, me, other, key):
         container.button("✓ Friends", key=key, disabled=True, use_container_width=True)
 
 
-# --- followers (one-way: no need for the other person to accept) ---
-def is_following(me, other):
-    return run("SELECT 1 FROM follows WHERE follower = ? AND followee = ?", (me, other), "one") is not None
-
-
-def follower_count(user):
-    return run("SELECT COUNT(*) FROM follows WHERE followee = ?", (user,), "one")[0]
-
-
-def following_count(user):
-    return run("SELECT COUNT(*) FROM follows WHERE follower = ?", (user,), "one")[0]
-
-
-def get_followers(user):
-    return [r[0] for r in run("SELECT follower FROM follows WHERE followee = ? ORDER BY created_at DESC", (user,), "all")]
-
-
-def get_following(user):
-    return [r[0] for r in run("SELECT followee FROM follows WHERE follower = ? ORDER BY created_at DESC", (user,), "all")]
-
-
-def cb_toggle_follow(me, other):
-    if me == other:
-        return
-    if is_following(me, other):
-        run("DELETE FROM follows WHERE follower = ? AND followee = ?", (me, other))
-    else:
-        run("INSERT OR IGNORE INTO follows (follower, followee, created_at) VALUES (?, ?, ?)",
-            (me, other, datetime.now().isoformat()))
-
-
-def follow_button(container, me, other, key):
-    if other == me:
-        return
-    if is_following(me, other):
-        container.button("✓ Following", key=key, on_click=cb_toggle_follow, args=(me, other), use_container_width=True)
-    else:
-        container.button("➕ Follow", key=key, type="primary", on_click=cb_toggle_follow, args=(me, other), use_container_width=True)
-
-
-# --- likes on feed posts ---
-def post_like_info(post_id, me):
-    count = run("SELECT COUNT(*) FROM post_likes WHERE post_id = ?", (post_id,), "one")[0]
-    mine = run("SELECT 1 FROM post_likes WHERE post_id = ? AND username = ?", (post_id, me), "one") is not None
-    return count, mine
-
-
-def cb_toggle_post_like(post_id, me):
-    _, mine = post_like_info(post_id, me)
-    if mine:
-        run("DELETE FROM post_likes WHERE post_id = ? AND username = ?", (post_id, me))
-    else:
-        run("INSERT OR IGNORE INTO post_likes (post_id, username) VALUES (?, ?)", (post_id, me))
-
-
+# --- delete your own posts, and profile pages ---
 def cb_delete_post(post_id, me):
     row = run("SELECT author_username FROM posts WHERE id = ?", (post_id,), "one")
     if not row or row[0] != me:  # only the author can delete
@@ -480,39 +430,22 @@ def cb_delete_post(post_id, me):
             pass
     run("DELETE FROM media WHERE post_id = ?", (post_id,))
     run("DELETE FROM comments WHERE post_id = ?", (post_id,))
-    run("DELETE FROM post_likes WHERE post_id = ?", (post_id,))
     run("DELETE FROM posts WHERE id = ?", (post_id,))
     st.toast("Post deleted", icon="🗑️")
-
-
-def post_actions(post_id, author, me, prefix, show_profile=True):
-    """Like button, profile button and (for your own posts) delete button."""
-    count, liked = post_like_info(post_id, me)
-    c1, c2, c3 = st.columns([2, 2, 2])
-    c1.button(f"{'❤️' if liked else '🤍'} {count}", key=f"{prefix}_like_{post_id}", on_click=cb_toggle_post_like,
-              args=(post_id, me), type="primary" if liked else "secondary", use_container_width=True)
-    if show_profile:
-        c2.button("👤 Profile", key=f"{prefix}_prof_{post_id}", on_click=cb_view_profile, args=(author,), use_container_width=True)
-    if author == me:
-        c3.button("🗑️ Delete", key=f"{prefix}_del_{post_id}", on_click=cb_delete_post, args=(post_id, me), use_container_width=True)
-
-
-# --- profiles and bio ---
-def get_bio(username):
-    row = run("SELECT bio FROM users WHERE username = ?", (username,), "one")
-    return (row[0] or "") if row else ""
-
-
-def cb_save_bio():
-    me = st.session_state.username
-    bio = (st.session_state.get("bio_input", "") or "").strip()[:150]
-    run("UPDATE users SET bio = ? WHERE username = ?", (bio, me))
-    st.toast("Bio saved", icon="✅")
 
 
 def cb_view_profile(username):
     st.session_state.page = "profile"
     st.session_state.profile_user = username
+
+
+def post_actions(post_id, author, me, prefix, show_profile=True):
+    """Profile button, and a delete button on your own posts."""
+    c1, c2, c3 = st.columns([2, 2, 2])
+    if show_profile:
+        c1.button("👤 Profile", key=f"{prefix}_prof_{post_id}", on_click=cb_view_profile, args=(author,), use_container_width=True)
+    if author == me:
+        c2.button("🗑️ Delete", key=f"{prefix}_del_{post_id}", on_click=cb_delete_post, args=(post_id, me), use_container_width=True)
 
 
 def cb_sign_out():
@@ -523,7 +456,7 @@ def cb_sign_out():
     st.session_state.username = ""
     st.session_state.token = ""
     st.session_state.page = "feed"
-    for key in ("chat_with", "theme_choice", "theme_bg", "theme_main", "theme_second", "reel_idx", "bio_input", "profile_user"):
+    for key in ("chat_with", "theme_choice", "theme_bg", "theme_main", "theme_second", "reel_idx", "profile_user"):
         st.session_state.pop(key, None)
 
 
@@ -1042,8 +975,6 @@ with st.sidebar:
                 run("UPDATE users SET display_name = ? WHERE username = ?", (new_display_name, current_user))
                 st.rerun()
 
-        st.text_area("Bio (up to 150 characters)", value=get_bio(current_user), max_chars=150, key="bio_input")
-        st.button("Save bio", on_click=cb_save_bio)
         st.button("👤 View my profile", key="view_my_profile", on_click=cb_view_profile, args=(current_user,))
 
         st.divider()
@@ -1067,7 +998,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v13")
+    st.caption("Design v14")
 
 # ------------------------------------------
 # PAGE: Feed
@@ -1122,10 +1053,9 @@ if st.session_state.page == "feed":
         with st.container(border=True):
             st.markdown(f'<div style="height:8px;border-radius:8px;background:{T["accents"][idx % len(T["accents"])]};margin-bottom:12px;"></div>',
                         unsafe_allow_html=True)
-            h_left, h_right, h_right2 = st.columns([4, 2, 2])
+            h_left, h_right = st.columns([5, 2])
             h_left.markdown(person_html(author_username, size=48, subtitle=f"🕒 {time_str}"), unsafe_allow_html=True)
             friend_button(h_right, current_user, author_username, f"postfriend_{post_id}")
-            follow_button(h_right2, current_user, author_username, f"postfollow_{post_id}")
             st.markdown(f'<div style="white-space: pre-wrap; margin: 10px 0;">{html.escape(note)}</div>', unsafe_allow_html=True)
 
             for file_path, ftype in media_rows:
@@ -1197,10 +1127,9 @@ elif st.session_state.page == "reels":
         time_str = datetime.fromisoformat(created_at).strftime("%d %b %Y, %H:%M")
 
         with st.container(border=True):
-            h_left, h_right, h_right2 = st.columns([4, 2, 2])
+            h_left, h_right = st.columns([5, 2])
             h_left.markdown(person_html(author, size=48, subtitle=f"🕒 {time_str}"), unsafe_allow_html=True)
             friend_button(h_right, current_user, author, f"reelfriend_{reel_id}")
-            follow_button(h_right2, current_user, author, f"reelfollow_{reel_id}")
             st.video(video_path, loop=True, autoplay=True, muted=True)
             if caption:
                 st.markdown(f'<div style="white-space: pre-wrap; margin: 6px 0;">{html.escape(caption)}</div>', unsafe_allow_html=True)
@@ -1316,7 +1245,7 @@ elif st.session_state.page == "chats":
             st.rerun()
 
 # ------------------------------------------
-# PAGE: Profile (someone's picture, bio, counts, posts and reels)
+# PAGE: Profile (someone's picture, counts, posts and reels)
 # ------------------------------------------
 elif st.session_state.page == "profile":
     target = st.session_state.get("profile_user")
@@ -1326,48 +1255,21 @@ elif st.session_state.page == "profile":
         st.info("That person wasn't found.")
     else:
         banner(get_display_name(target), f"@{target}", "profile")
-        bio = get_bio(target)
-        top_l, top_r = st.columns([1, 4])
-        top_l.markdown(avatar_html(target, size=96), unsafe_allow_html=True)
-        with top_r:
-            if bio:
-                st.markdown(f'<div style="white-space: pre-wrap;">{html.escape(bio)}</div>', unsafe_allow_html=True)
-            elif target == current_user:
-                st.caption("You haven't written a bio yet. Add one in ⚙️ Profile Settings in the sidebar.")
-            else:
-                st.caption("No bio yet.")
+        st.markdown(avatar_html(target, size=96), unsafe_allow_html=True)
 
         n_posts = run("SELECT COUNT(*) FROM posts WHERE author_username = ?", (target,), "one")[0]
         n_reels = len([r for r in get_reels() if r[1] == target])
-        m1, m2, m3, m4 = st.columns(4)
+        n_friends = len(get_friends(target))
+        m1, m2, m3 = st.columns(3)
         m1.metric("Posts", n_posts)
         m2.metric("Reels", n_reels)
-        m3.metric("Followers", follower_count(target))
-        m4.metric("Following", following_count(target))
+        m3.metric("Friends", n_friends)
 
         if target != current_user:
-            b1, b2, b3 = st.columns(3)
-            follow_button(b1, current_user, target, "prof_follow")
-            friend_button(b2, current_user, target, "prof_friend")
+            b1, b2 = st.columns(2)
+            friend_button(b1, current_user, target, "prof_friend")
             if friendship_status(current_user, target) == "friends":
-                b3.button("💬 Message", key="prof_msg", on_click=cb_open_chat, args=(target,), use_container_width=True)
-
-        with st.expander(f"Followers ({follower_count(target)})"):
-            people = get_followers(target)
-            if not people:
-                st.caption("No followers yet.")
-            for u in people:
-                c1, c2 = st.columns([5, 2])
-                c1.markdown(person_html(u), unsafe_allow_html=True)
-                c2.button("👤 Profile", key=f"pf_fol_{u}", on_click=cb_view_profile, args=(u,))
-        with st.expander(f"Following ({following_count(target)})"):
-            people = get_following(target)
-            if not people:
-                st.caption("Not following anyone yet.")
-            for u in people:
-                c1, c2 = st.columns([5, 2])
-                c1.markdown(person_html(u), unsafe_allow_html=True)
-                c2.button("👤 Profile", key=f"pf_fng_{u}", on_click=cb_view_profile, args=(u,))
+                b2.button("💬 Message", key="prof_msg", on_click=cb_open_chat, args=(target,), use_container_width=True)
 
         tab_posts, tab_reels = st.tabs(["Posts", "Reels"])
         with tab_posts:
@@ -1395,8 +1297,6 @@ elif st.session_state.page == "profile":
                     st.video(r_path)
                     if r_caption:
                         st.caption(r_caption)
-                    r_count, _mine = reel_likes(r_id, current_user)
-                    st.caption(f"❤️ {r_count}")
 
 # ------------------------------------------
 # PAGE: Yuaan (built-in helper)
