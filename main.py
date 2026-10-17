@@ -1,31 +1,30 @@
 import streamlit as st
-import sqlite3
 import uuid
 import os
 import re
 import html
-import base64
 import io
 import random
+import hashlib
+import hmac
+import time
 import requests
+import psycopg2
+from urllib.parse import quote, unquote
+import psycopg2.pool
+from psycopg2.pool import ThreadedConnectionPool
 from datetime import datetime, timedelta
 from PIL import Image, ImageOps
 
 # ==========================================
-# 1. Setup: folders and database
+# 1. Setup
 # ==========================================
 st.set_page_config(page_title="Yuaan Post", page_icon="📸", layout="centered")
 
-UPLOAD_DIR = "uploads"
-AVATAR_DIR = os.path.join(UPLOAD_DIR, "avatars")
-REEL_DIR = os.path.join(UPLOAD_DIR, "reels")
-DB_PATH = "diary.db"
-SESSION_DAYS = 30   # how long "stay logged in" lasts
-MAX_REEL_MB = 100   # biggest reel video allowed
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(AVATAR_DIR, exist_ok=True)
-os.makedirs(REEL_DIR, exist_ok=True)
+BUCKET = "uploads"   # name of the Supabase Storage bucket for photos, reels and profile pictures
+SESSION_DAYS = 30    # how long "stay logged in" lasts
+MAX_REEL_MB = 50     # biggest reel video allowed (Supabase's free plan allows 50 MB per file)
+MAX_VIDEO_MB = 50    # biggest video allowed in a post
 
 
 # ==========================================
@@ -229,51 +228,209 @@ def banner(title, subtitle, page_key):
 # ==========================================
 # 3. Database
 # ==========================================
+def get_secret(name):
+    try:
+        v = st.secrets.get(name)
+    except Exception:
+        v = None
+    return v or os.environ.get(name)
+
+
+DB_URL = get_secret("SUPABASE_DB_URL")
+SUPABASE_URL = (get_secret("SUPABASE_URL") or "").strip().rstrip("/")
+SUPABASE_KEY = (get_secret("SUPABASE_KEY") or "").strip()
+
+if not (DB_URL and SUPABASE_URL and SUPABASE_KEY):
+    st.error("This app isn't connected to Supabase yet. Open Manage app → ⋮ → Settings → Secrets and add "
+             "SUPABASE_DB_URL, SUPABASE_URL and SUPABASE_KEY, then reboot the app.")
+    st.stop()
+
+
+def _fix_dsn(url):
+    """If the password has symbols like @ # / ?, they must be percent-encoded. Do it here so a pasted link still works."""
+    m = re.match(r"^(postgres(?:ql)?://)([^:/@]+):(.*)@([^@]+)$", url.strip())
+    if not m:
+        return url.strip()
+    scheme, user, password, rest = m.groups()
+    return f"{scheme}{user}:{quote(unquote(password), safe='')}@{rest}"
+
+
+@st.cache_resource
+def get_pool():
+    return ThreadedConnectionPool(1, 8, dsn=_fix_dsn(DB_URL), connect_timeout=10, keepalives=1, keepalives_idle=30)
+
+
+def _to_pg(sql):
+    """The SQL below is written with ? placeholders; Postgres wants %s."""
+    sql = sql.replace("?", "%s")
+    if re.match(r"\s*INSERT OR IGNORE INTO", sql, re.I):
+        sql = re.sub(r"INSERT OR IGNORE INTO", "INSERT INTO", sql, count=1, flags=re.I).rstrip().rstrip(";")
+        sql += " ON CONFLICT DO NOTHING"
+    return sql
+
+
+def _execute(sql, params, fetch):
+    sql = _to_pg(sql)
+    for attempt in (1, 2):
+        pool = get_pool()
+        conn = None
+        for _ in range(20):  # all connections busy: wait a moment for one to free up
+            try:
+                conn = pool.getconn()
+                break
+            except psycopg2.pool.PoolError:
+                time.sleep(0.25)
+        if conn is None:
+            raise RuntimeError("The database is busy, please try again.")
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                result = cur.fetchall() if fetch == "all" else cur.fetchone() if fetch == "one" else None
+            pool.putconn(conn)
+            return result
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            # the connection went stale (Supabase closes idle ones): drop it and try once more with a fresh pool
+            try:
+                pool.putconn(conn, close=True)
+                pool.closeall()
+            except Exception:
+                pass
+            get_pool.clear()
+            if attempt == 2:
+                raise
+        except Exception:
+            pool.putconn(conn)
+            raise
+
+
 def run(sql, params=(), fetch=None):
     """Run one SQL statement and return rows ('all'), one row ('one') or nothing."""
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        cur = conn.execute(sql, params)
-        conn.commit()
-        if fetch == "all":
-            return cur.fetchall()
-        if fetch == "one":
-            return cur.fetchone()
-    finally:
-        conn.close()
+    result = _execute(sql, tuple(params), fetch)
+    # names, pictures and friendships are cached for a few seconds, so forget them whenever they change
+    if re.match(r"\s*(INSERT|UPDATE|DELETE)\b.*\b(users|friendships)\b", sql, re.I | re.S):
+        st.cache_data.clear()
+    return result
 
 
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_query(sql, params, fetch):
+    return _execute(sql, params, fetch)
+
+
+def cached_run(sql, params=(), fetch="one"):
+    """Like run(), for things read many times per page (names, pictures, friend status)."""
+    return _cached_query(sql, tuple(params), fetch)
+
+
+@st.cache_resource(show_spinner="Setting up the database...")
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL, display_name TEXT NOT NULL)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY, post_id TEXT NOT NULL, file_path TEXT NOT NULL, file_type TEXT NOT NULL, position INTEGER NOT NULL)''')
-    # comments are used for both posts and reels (post_id holds either id)
-    conn.execute('''CREATE TABLE IF NOT EXISTS comments (id TEXT PRIMARY KEY, post_id TEXT NOT NULL, author_username TEXT NOT NULL, comment_text TEXT NOT NULL, created_at TEXT NOT NULL)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, username TEXT NOT NULL, expires_at TEXT NOT NULL)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS friendships (id TEXT PRIMARY KEY, requester TEXT NOT NULL, addressee TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, sender TEXT NOT NULL, receiver TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, is_read INTEGER NOT NULL DEFAULT 0)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS reels (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, video_path TEXT NOT NULL, caption TEXT NOT NULL, created_at TEXT NOT NULL)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS reel_likes (reel_id TEXT NOT NULL, username TEXT NOT NULL, PRIMARY KEY (reel_id, username))''')
-    # each person's private conversation with Yuaan AI
-    conn.execute('''CREATE TABLE IF NOT EXISTS ai_messages (id TEXT PRIMARY KEY, username TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)''')
-    # add new columns to an existing users table (safe to run every time)
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(users)")]
-    if "avatar_path" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN avatar_path TEXT")
-    if "theme" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN theme TEXT")
-    conn.commit()
-    conn.close()
+    tables = [
+        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL, display_name TEXT NOT NULL, avatar_path TEXT, theme TEXT)",
+        "CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL)",
+        'CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY, post_id TEXT NOT NULL, file_path TEXT NOT NULL, file_type TEXT NOT NULL, "position" INTEGER NOT NULL)',
+        # comments are used for both posts and reels (post_id holds either id)
+        "CREATE TABLE IF NOT EXISTS comments (id TEXT PRIMARY KEY, post_id TEXT NOT NULL, author_username TEXT NOT NULL, comment_text TEXT NOT NULL, created_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, username TEXT NOT NULL, expires_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS friendships (id TEXT PRIMARY KEY, requester TEXT NOT NULL, addressee TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, sender TEXT NOT NULL, receiver TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, is_read INTEGER NOT NULL DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS reels (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, video_path TEXT NOT NULL, caption TEXT NOT NULL, created_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS reel_likes (reel_id TEXT NOT NULL, username TEXT NOT NULL, PRIMARY KEY (reel_id, username))",
+        # each person's private conversation with Yuaan
+        "CREATE TABLE IF NOT EXISTS ai_messages (id TEXT PRIMARY KEY, username TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)",
+    ]
+    for sql in tables:
+        run(sql)
+    # keeps pages quick
+    for sql in ("CREATE INDEX IF NOT EXISTS idx_posts_created ON posts (created_at)",
+                "CREATE INDEX IF NOT EXISTS idx_media_post ON media (post_id)",
+                "CREATE INDEX IF NOT EXISTS idx_comments_post ON comments (post_id)",
+                "CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages (sender, receiver)",
+                "CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages (receiver, is_read)"):
+        run(sql)
+    # Supabase also exposes tables through a public web API. Turning row security on (with no rules)
+    # shuts that door; this app talks to the database directly, so it is not affected.
+    for name in ("users", "posts", "media", "comments", "sessions", "friendships", "messages", "reels", "reel_likes", "ai_messages"):
+        run(f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY")
+    return True
 
 
-init_db()
+try:
+    init_db()
+except Exception as e:
+    st.error("Couldn't connect to the database. Check that SUPABASE_DB_URL in Secrets is the Session pooler link "
+             "with your real password in it (no square brackets), then reboot the app.")
+    if isinstance(e, psycopg2.OperationalError):
+        st.caption(str(e).strip()[:300])
+    else:
+        st.caption(f"({type(e).__name__})")
+    st.stop()
+
+
+# --- file storage (Supabase Storage). The database keeps only each file's name; the file itself lives in the bucket. ---
+def _storage_headers(content_type=None):
+    h = {"apikey": SUPABASE_KEY}
+    if SUPABASE_KEY.startswith("eyJ"):  # older style keys are also sent as a bearer token
+        h["Authorization"] = f"Bearer {SUPABASE_KEY}"
+    if content_type:
+        h["Content-Type"] = content_type
+    return h
+
+
+def upload_file(data, folder, ext, content_type):
+    """Saves bytes in the bucket and returns the file's name (key)."""
+    ext = re.sub(r"[^.a-z0-9]", "", (ext or "").lower())[:8]
+    key = f"{folder}/{uuid.uuid4().hex}{ext}"
+    resp = requests.post(f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{key}",
+                         headers={**_storage_headers(content_type), "x-upsert": "true"}, data=data, timeout=180)
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"Upload failed ({resp.status_code})")
+    return key
+
+
+def file_url(key):
+    return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{key}"
+
+
+def delete_file(key):
+    try:
+        requests.delete(f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{key}", headers=_storage_headers(), timeout=30)
+    except Exception:
+        pass
+
+
+def download_file(key):
+    resp = requests.get(file_url(key), timeout=60)
+    resp.raise_for_status()
+    return resp.content
+
+
+# --- passwords: only a scrambled (hashed) version is stored ---
+PBKDF_ROUNDS = 200_000
+
+
+def hash_password(password):
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PBKDF_ROUNDS)
+    return f"pbkdf2${PBKDF_ROUNDS}${salt.hex()}${digest.hex()}"
+
+
+def check_password(password, stored):
+    if stored.startswith("pbkdf2$"):
+        try:
+            _, rounds, salt, digest = stored.split("$")
+            calc = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), int(rounds))
+            return hmac.compare_digest(calc.hex(), digest)
+        except Exception:
+            return False
+    return hmac.compare_digest(stored.encode(), password.encode())  # an old plain-text password
+
 
 # ==========================================
 # 4. Helper functions
 # ==========================================
 def get_display_name(username):
-    row = run("SELECT display_name FROM users WHERE username = ?", (username,), "one")
+    row = cached_run("SELECT display_name FROM users WHERE username = ?", (username,), "one")
     return row[0] if row else username
 
 
@@ -304,25 +461,18 @@ def delete_session(token):
 
 # --- profile pictures ---
 def get_avatar_path(username):
-    row = run("SELECT avatar_path FROM users WHERE username = ?", (username,), "one")
-    if row and row[0] and os.path.exists(row[0]):
-        return row[0]
-    return None
-
-
-@st.cache_data(show_spinner=False)
-def _file_b64(path):
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode()
+    """Web address of someone's profile picture, or None if they haven't set one."""
+    row = cached_run("SELECT avatar_path FROM users WHERE username = ?", (username,), "one")
+    return file_url(row[0]) if row and row[0] else None
 
 
 def avatar_html(username, size=40):
     """Round profile picture with a gradient ring; without a picture, a coloured circle with the first letter."""
     inner = size - 10  # room for the gradient ring (3px) and a gap (2px) on each side
-    path = get_avatar_path(username)
+    url = get_avatar_path(username)
     acc = T["accents"]
-    if path:
-        face = (f'<img src="data:image/jpeg;base64,{_file_b64(path)}" '
+    if url:
+        face = (f'<img src="{url}" '
                 f'style="width:{inner}px;height:{inner}px;border-radius:50%;object-fit:cover;display:block;">')
     else:
         colour = acc[sum(ord(ch) for ch in username) % len(acc)]  # each person gets their own colour
@@ -336,10 +486,9 @@ def avatar_html(username, size=40):
             f'<div style="padding:2px;border-radius:50%;background:{T["surface"]};display:flex;">{face}</div></div>')
 
 
-@st.cache_data(show_spinner=False)
-def _display_b64(path, side=1400):
-    """Upright, web-sized copy of a photo (fixes sideways phone photos). Returns base64 JPEG."""
-    img = ImageOps.exif_transpose(Image.open(path))
+def prepare_photo(data, side=1600, quality=85):
+    """Upright, web-sized JPEG of a photo (turns sideways phone photos the right way up)."""
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(data)))
     if img.mode in ("RGBA", "LA", "P"):
         img = img.convert("RGBA")
         bg = Image.new("RGB", img.size, (255, 255, 255))
@@ -349,43 +498,33 @@ def _display_b64(path, side=1400):
         img = img.convert("RGB")
     img.thumbnail((side, side))
     buf = io.BytesIO()
-    img.save(buf, "JPEG", quality=85)
-    return base64.b64encode(buf.getvalue()).decode()
+    img.save(buf, "JPEG", quality=quality)
+    return buf.getvalue()
 
 
-def cb_rotate_photo(path):
-    """Turns a photo a quarter-turn clockwise and saves it (used by the Rotate button on your own posts)."""
+def cb_rotate_photo(key):
+    """Turns a photo a quarter-turn clockwise (used by the Rotate button on your own posts)."""
     try:
-        with Image.open(path) as im:
-            fmt = im.format or "JPEG"
-            im.load()
-            img = ImageOps.exif_transpose(im)
-            img = img.rotate(-90, expand=True)
-        if fmt == "JPEG":
-            img.convert("RGB").save(path, "JPEG", quality=92)
-        else:
-            img.save(path, fmt)
-        _display_b64.clear()  # forget the old picture so the new one shows
+        img = Image.open(io.BytesIO(download_file(key))).convert("RGB").rotate(-90, expand=True)
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=90)
+        new_key = upload_file(buf.getvalue(), "posts", ".jpg", "image/jpeg")  # a new name, so no one sees the old cached picture
+        run("UPDATE media SET file_path = ? WHERE file_path = ?", (new_key, key))
+        delete_file(key)
     except Exception:
         st.toast("Couldn't rotate that photo", icon="⚠️")
 
 
-def show_image(path):
+def show_image(key):
     """Portrait photos stay portrait, landscape stay landscape. Nothing is cropped or stretched."""
-    try:
-        data = _display_b64(path)
-    except Exception:
-        st.image(path, use_container_width=True)
-        return
-    st.markdown(f'<img src="data:image/jpeg;base64,{data}" style="display:block;margin:6px auto;max-width:100%;'
+    st.markdown(f'<img src="{file_url(key)}" style="display:block;margin:6px auto;max-width:100%;'
                 f'max-height:75vh;width:auto;height:auto;border-radius:16px;">', unsafe_allow_html=True)
 
 
 def show_media(rows, can_edit=False, key_prefix=""):
-    """rows = [(file_path, file_type), ...]. One photo: shown whole. Several: Facebook-style grid with +N on the last tile."""
-    items = [(p, t) for p, t in rows if os.path.exists(p)]
-    images = [p for p, t in items if "video" not in t]
-    videos = [p for p, t in items if "video" in t]
+    """rows = [(file_key, file_type), ...]. One photo: shown whole. Several: Facebook-style grid with +N on the last tile."""
+    images = [p for p, t in rows if "video" not in t]
+    videos = [p for p, t in rows if "video" in t]
 
     def rotate_button(i, path):
         if can_edit:
@@ -396,13 +535,8 @@ def show_media(rows, can_edit=False, key_prefix=""):
         rotate_button(0, images[0])
     elif len(images) > 1:
         n = len(images)
-        shown = images[:4]
         cells = []
-        for i, path in enumerate(shown):
-            try:
-                src = f"data:image/jpeg;base64,{_display_b64(path, 800)}"
-            except Exception:
-                continue
+        for i, path in enumerate(images[:4]):
             if n == 3 and i == 0:
                 ratio, span = "16 / 10", "grid-column:1 / -1;"
             elif n == 2:
@@ -414,7 +548,7 @@ def show_media(rows, can_edit=False, key_prefix=""):
                 extra = ('<div style="position:absolute;inset:0;background:rgba(0,0,0,.55);color:#fff;display:flex;'
                          f'align-items:center;justify-content:center;font-size:2.4rem;font-weight:800;">+{n - 4}</div>')
             cells.append(f'<div style="position:relative;aspect-ratio:{ratio};{span}overflow:hidden;">'
-                         f'<img src="{src}" style="width:100%;height:100%;object-fit:cover;display:block;">{extra}</div>')
+                         f'<img src="{file_url(path)}" style="width:100%;height:100%;object-fit:cover;display:block;">{extra}</div>')
         st.markdown('<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;border-radius:16px;overflow:hidden;margin:6px 0;">'
                     + "".join(cells) + "</div>", unsafe_allow_html=True)
         with st.expander(f"📷 See all {n} photos"):
@@ -423,7 +557,7 @@ def show_media(rows, can_edit=False, key_prefix=""):
                 rotate_button(i, path)
 
     for path in videos:
-        st.video(path)
+        st.video(file_url(path))
 
 
 def person_html(username, size=44, subtitle=None):
@@ -438,22 +572,21 @@ def save_avatar(username, uploaded):
     img = Image.open(uploaded)
     img = ImageOps.exif_transpose(img).convert("RGB")
     img = ImageOps.fit(img, (300, 300))  # centre-crop to a square
-    new_path = os.path.join(AVATAR_DIR, f"{uuid.uuid4().hex}.jpg")
-    img.save(new_path, "JPEG", quality=88)
-    old = get_avatar_path(username)
-    run("UPDATE users SET avatar_path = ? WHERE username = ?", (new_path, username))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=88)
+    new_key = upload_file(buf.getvalue(), "avatars", ".jpg", "image/jpeg")
+    row = run("SELECT avatar_path FROM users WHERE username = ?", (username,), "one")
+    old = row[0] if row else None
+    run("UPDATE users SET avatar_path = ? WHERE username = ?", (new_key, username))
     if old:
-        try:
-            os.remove(old)
-        except OSError:
-            pass
+        delete_file(old)
 
 
 # --- friends ---
 def friendship_status(me, other):
     """Returns 'friends', 'sent' (I asked them), 'received' (they asked me) or 'none'."""
-    row = run("SELECT requester, status FROM friendships WHERE (requester = ? AND addressee = ?) OR (requester = ? AND addressee = ?)",
-              (me, other, other, me), "one")
+    row = cached_run("SELECT requester, status FROM friendships WHERE (requester = ? AND addressee = ?) OR (requester = ? AND addressee = ?)",
+                     (me, other, other, me), "one")
     if not row:
         return "none"
     if row[1] == "accepted":
@@ -510,10 +643,7 @@ def cb_delete_post(post_id, me):
     if not row or row[0] != me:  # only the author can delete
         return
     for (path,) in run("SELECT file_path FROM media WHERE post_id = ?", (post_id,), "all"):
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+        delete_file(path)
     run("DELETE FROM media WHERE post_id = ?", (post_id,))
     run("DELETE FROM comments WHERE post_id = ?", (post_id,))
     run("DELETE FROM posts WHERE id = ?", (post_id,))
@@ -603,8 +733,7 @@ def render_messages(me, other):
 
 # --- reels ---
 def get_reels():
-    rows = run("SELECT id, author_username, video_path, caption, created_at FROM reels ORDER BY created_at DESC", fetch="all")
-    return [r for r in rows if os.path.exists(r[2])]
+    return run("SELECT id, author_username, video_path, caption, created_at FROM reels ORDER BY created_at DESC", fetch="all")
 
 
 def reel_likes(reel_id, me):
@@ -631,10 +760,7 @@ def cb_delete_reel(reel_id, me):
         run("DELETE FROM reels WHERE id = ?", (reel_id,))
         run("DELETE FROM reel_likes WHERE reel_id = ?", (reel_id,))
         run("DELETE FROM comments WHERE post_id = ?", (reel_id,))
-        try:
-            os.remove(row[1])
-        except OSError:
-            pass
+        delete_file(row[1])
         st.session_state.reel_idx = 0
 
 
@@ -876,14 +1002,6 @@ YUAAN_SYSTEM = ("You are Yuaan, a friendly helper inside a small social app call
                 "Never ask for personal details like addresses, passwords or phone numbers.")
 
 
-def get_secret(name):
-    try:
-        v = st.secrets.get(name)
-    except Exception:
-        v = None
-    return v or os.environ.get(name)
-
-
 def ai_used_today(username):
     today = datetime.now().strftime("%Y-%m-%d")
     row = run("SELECT COUNT(*) FROM ai_messages WHERE username = ? AND role = 'user' AND created_at >= ?",
@@ -987,8 +1105,11 @@ if not st.session_state.logged_in:
         login_user = st.text_input("Username", key="login_user")
         login_pass = st.text_input("Password", type="password", key="login_pass")
         if st.button("Login"):
-            user = run("SELECT * FROM users WHERE username = ? AND password = ?", (login_user, login_pass), "one")
-            if user:
+            login_user = login_user.strip()
+            row = run("SELECT password FROM users WHERE username = ?", (login_user,), "one")
+            if row and check_password(login_pass, row[0]):
+                if not row[0].startswith("pbkdf2$"):  # an old plain-text password: scramble it now
+                    run("UPDATE users SET password = ? WHERE username = ?", (hash_password(login_pass), login_user))
                 st.session_state.logged_in = True
                 st.session_state.username = login_user
                 token = create_session(login_user)
@@ -1005,9 +1126,9 @@ if not st.session_state.logged_in:
         if st.button("Sign Up"):
             if reg_user and reg_pass and reg_name:
                 try:
-                    run("INSERT INTO users (username, password, display_name) VALUES (?, ?, ?)", (reg_user.strip(), reg_pass, reg_name))
+                    run("INSERT INTO users (username, password, display_name) VALUES (?, ?, ?)", (reg_user.strip(), hash_password(reg_pass), reg_name))
                     st.success("success! go to the login page to start")
-                except sqlite3.IntegrityError:
+                except psycopg2.IntegrityError:
                     st.error("This username has been taken please select a new one!")
             else:
                 st.warning("Add all information")
@@ -1084,7 +1205,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v18")
+    st.caption("Design v19")
 
 # ------------------------------------------
 # PAGE: Feed
@@ -1102,38 +1223,56 @@ if st.session_state.page == "feed":
             if note:
                 post_id = str(uuid.uuid4())
                 created_at = datetime.now().isoformat()
-                conn = sqlite3.connect(DB_PATH)
-                conn.execute("INSERT INTO posts (id, author_username, note, created_at) VALUES (?, ?, ?, ?)", (post_id, current_user, note, created_at))
-                if uploaded_files:
-                    for position, file in enumerate(uploaded_files):
-                        media_id = str(uuid.uuid4())
-                        file_ext = os.path.splitext(file.name)[1]
-                        file_path = os.path.join(UPLOAD_DIR, f"{media_id}{file_ext}")
-                        with open(file_path, "wb") as f:
-                            f.write(file.getvalue())
-                        conn.execute("INSERT INTO media (id, post_id, file_path, file_type, position) VALUES (?, ?, ?, ?, ?)", (media_id, post_id, file_path, file.type, position))
-                conn.commit()
-                conn.close()
-                st.success("success! 🎉")
-                st.rerun()
+                saved_files = []  # (key, mime type)
+                problem = None
+                with st.spinner("Posting..."):
+                    try:
+                        for file in (uploaded_files or []):
+                            ext = os.path.splitext(file.name)[1].lower()
+                            if "video" in (file.type or "") or ext in (".mp4", ".mov"):
+                                if file.size > MAX_VIDEO_MB * 1024 * 1024:
+                                    problem = f"A video is bigger than {MAX_VIDEO_MB} MB. Choose a shorter one."
+                                    break
+                                mime = "video/quicktime" if ext == ".mov" else (file.type or "video/mp4")
+                                saved_files.append((upload_file(file.getvalue(), "posts", ext or ".mp4", mime), mime))
+                            else:
+                                saved_files.append((upload_file(prepare_photo(file.getvalue()), "posts", ".jpg", "image/jpeg"), "image/jpeg"))
+                    except Exception:
+                        problem = "A file couldn't be uploaded. Please try again."
+                if problem:
+                    for key, _ in saved_files:  # don't leave half a post behind
+                        delete_file(key)
+                    st.error(problem)
+                else:
+                    run("INSERT INTO posts (id, author_username, note, created_at) VALUES (?, ?, ?, ?)", (post_id, current_user, note, created_at))
+                    for position, (key, mime) in enumerate(saved_files):
+                        run('INSERT INTO media (id, post_id, file_path, file_type, "position") VALUES (?, ?, ?, ?, ?)',
+                            (str(uuid.uuid4()), post_id, key, mime, position))
+                    st.success("success! 🎉")
+                    st.rerun()
             else:
                 st.warning("Add a description(can be anything)!")
 
     st.write("")
     st.header("Latest posts")
 
-    conn = sqlite3.connect(DB_PATH)
-    posts = conn.execute('''
-        SELECT posts.id, posts.note, posts.created_at, posts.author_username
-        FROM posts
-        ORDER BY posts.created_at DESC
-    ''').fetchall()
+    posts = run("SELECT id, note, created_at, author_username FROM posts ORDER BY created_at DESC LIMIT 40", fetch="all")
 
-    if not posts:
+    media_by_post, comments_by_post = {}, {}
+    if posts:
+        marks = ",".join("?" * len(posts))
+        ids = tuple(p[0] for p in posts)
+        for m_post, m_key, m_type in run(f'SELECT post_id, file_path, file_type FROM media WHERE post_id IN ({marks}) ORDER BY "position"', ids, "all"):
+            media_by_post.setdefault(m_post, []).append((m_key, m_type))
+        for c_post, c_author, c_text in run(f'''SELECT comments.post_id, users.display_name, comments.comment_text
+                                               FROM comments LEFT JOIN users ON comments.author_username = users.username
+                                               WHERE comments.post_id IN ({marks}) ORDER BY comments.created_at ASC''', ids, "all"):
+            comments_by_post.setdefault(c_post, []).append((c_author, c_text))
+    else:
         st.info("Nothing here yet. Write the first post above.")
 
     for idx, (post_id, note, created_at, author_username) in enumerate(posts):
-        media_rows = conn.execute("SELECT file_path, file_type FROM media WHERE post_id = ? ORDER BY position", (post_id,)).fetchall()
+        media_rows = media_by_post.get(post_id, [])
         time_str = datetime.fromisoformat(created_at).strftime("%d %b %Y, %H:%M")
 
         with st.container(border=True):
@@ -1148,14 +1287,7 @@ if st.session_state.page == "feed":
 
             post_actions(post_id, author_username, current_user, "feed")
 
-            comments = conn.execute('''
-                SELECT users.display_name, comments.comment_text
-                FROM comments
-                LEFT JOIN users ON comments.author_username = users.username
-                WHERE comments.post_id = ?
-                ORDER BY comments.created_at ASC
-            ''', (post_id,)).fetchall()
-
+            comments = comments_by_post.get(post_id, [])
             with st.expander(f"💬 comment ({len(comments)} comment)"):
                 for c_author, c_text in comments:
                     st.markdown(f"**{c_author or 'Unknown'}**: {c_text}")
@@ -1164,11 +1296,9 @@ if st.session_state.page == "feed":
                     new_comment = st.text_input("comment...")
                     if st.form_submit_button("send"):
                         if new_comment:
-                            conn.execute("INSERT INTO comments (id, post_id, author_username, comment_text, created_at) VALUES (?, ?, ?, ?, ?)",
-                                         (str(uuid.uuid4()), post_id, current_user, new_comment, datetime.now().isoformat()))
-                            conn.commit()
+                            run("INSERT INTO comments (id, post_id, author_username, comment_text, created_at) VALUES (?, ?, ?, ?, ?)",
+                                (str(uuid.uuid4()), post_id, current_user, new_comment, datetime.now().isoformat()))
                             st.rerun()
-    conn.close()
 
 # ------------------------------------------
 # PAGE: Reels (short videos, one at a time)
@@ -1188,13 +1318,16 @@ elif st.session_state.page == "reels":
                 else:
                     reel_id = str(uuid.uuid4())
                     ext = os.path.splitext(reel_file.name)[1].lower() or ".mp4"
-                    reel_path = os.path.join(REEL_DIR, f"{reel_id}{ext}")
-                    with open(reel_path, "wb") as f:
-                        f.write(reel_file.getvalue())
-                    run("INSERT INTO reels (id, author_username, video_path, caption, created_at) VALUES (?, ?, ?, ?, ?)",
-                        (reel_id, current_user, reel_path, reel_caption.strip(), datetime.now().isoformat()))
-                    st.session_state.reel_idx = 0  # show the new reel first
-                    st.rerun()
+                    mime = {".mov": "video/quicktime", ".webm": "video/webm"}.get(ext, "video/mp4")
+                    try:
+                        with st.spinner("Uploading your reel..."):
+                            reel_key = upload_file(reel_file.getvalue(), "reels", ext, mime)
+                        run("INSERT INTO reels (id, author_username, video_path, caption, created_at) VALUES (?, ?, ?, ?, ?)",
+                            (reel_id, current_user, reel_key, reel_caption.strip(), datetime.now().isoformat()))
+                        st.session_state.reel_idx = 0  # show the new reel first
+                        st.rerun()
+                    except (RuntimeError, requests.RequestException):
+                        st.error("The reel couldn't be uploaded. Please try again.")
 
     reels = get_reels()
     if not reels:
@@ -1211,7 +1344,7 @@ elif st.session_state.page == "reels":
             h_left, h_right = st.columns([5, 2])
             h_left.markdown(person_html(author, size=48, subtitle=f"🕒 {time_str}"), unsafe_allow_html=True)
             friend_button(h_right, current_user, author, f"reelfriend_{reel_id}")
-            st.video(video_path, loop=True, autoplay=True, muted=True)
+            st.video(file_url(video_path), loop=True, autoplay=True, muted=True)
             if caption:
                 st.markdown(f'<div style="white-space: pre-wrap; margin: 6px 0;">{html.escape(caption)}</div>', unsafe_allow_html=True)
 
@@ -1266,7 +1399,7 @@ elif st.session_state.page == "friends":
     if query.strip():
         like = f"%{query.strip()}%"
         results = run('''SELECT username FROM users
-                         WHERE username != ? AND (username LIKE ? OR display_name LIKE ?)
+                         WHERE username != ? AND (username ILIKE ? OR display_name ILIKE ?)
                          ORDER BY username LIMIT 20''', (current_user, like, like), "all")
         if not results:
             st.caption("No users found.")
@@ -1362,7 +1495,7 @@ elif st.session_state.page == "profile":
                 with st.container(border=True):
                     st.caption(f"🕒 {datetime.fromisoformat(p_created).strftime('%d %b %Y, %H:%M')}")
                     st.markdown(f'<div style="white-space: pre-wrap; margin: 6px 0;">{html.escape(p_note)}</div>', unsafe_allow_html=True)
-                    show_media(run("SELECT file_path, file_type FROM media WHERE post_id = ? ORDER BY position", (p_id,), "all"),
+                    show_media(run("SELECT file_path, file_type FROM media WHERE post_id = ? ORDER BY \"position\"", (p_id,), "all"),
                                can_edit=(target == current_user), key_prefix=f"prof_{p_id}")
                     post_actions(p_id, target, current_user, "prof", show_profile=False)
         with tab_reels:
@@ -1371,7 +1504,7 @@ elif st.session_state.page == "profile":
                 st.caption("No reels yet.")
             for r_id, _, r_path, r_caption, _ in their_reels:
                 with st.container(border=True):
-                    st.video(r_path)
+                    st.video(file_url(r_path))
                     if r_caption:
                         st.caption(r_caption)
 
@@ -1382,7 +1515,7 @@ elif st.session_state.page == "yuaan":
     banner("Yuaan", "Your built-in helper for captions, ideas and app tips.", "yuaan")
 
     my_avatar = get_avatar_path(current_user) or "👤"
-    history = run("SELECT role, content FROM ai_messages WHERE username = ? ORDER BY created_at ASC, rowid ASC",
+    history = run("SELECT role, content FROM ai_messages WHERE username = ? ORDER BY created_at ASC",
                   (current_user,), "all")
 
     quick = [("✍️ Caption ideas", "caption ideas"), ("💡 Post ideas", "post ideas"), ("🎬 Reel ideas", "reel ideas"),
