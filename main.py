@@ -88,6 +88,7 @@ def make_theme(bg, primary, secondary, ink=None, accents=None):
             "friends": (d(accents[2]), d(accents[1])),
             "chats": (d(accents[3]), d(accents[0])),
             "yuaan": (d(accents[2]), d(accents[3], 0.24)),
+            "foryou": (d(accents[3]), d(accents[1])),
             "profile": (d(accents[3]), d(accents[2])),
         },
     }
@@ -240,9 +241,14 @@ DB_URL = get_secret("SUPABASE_DB_URL")
 SUPABASE_URL = (get_secret("SUPABASE_URL") or "").strip().rstrip("/")
 SUPABASE_KEY = (get_secret("SUPABASE_KEY") or "").strip()
 
-if not (DB_URL and SUPABASE_URL and SUPABASE_KEY):
-    st.error("This app isn't connected to Supabase yet. Open Manage app → ⋮ → Settings → Secrets and add "
-             "SUPABASE_DB_URL, SUPABASE_URL and SUPABASE_KEY, then reboot the app.")
+_missing = [n for n, v in (("SUPABASE_DB_URL", DB_URL), ("SUPABASE_URL", SUPABASE_URL), ("SUPABASE_KEY", SUPABASE_KEY)) if not v]
+if _missing:
+    st.error("This app isn't connected to Supabase yet. Missing in Secrets: " + ", ".join(_missing) +
+             ". Open Manage app → ⋮ → Settings → Secrets, check the spelling and the straight quote marks, "
+             "click Save, then reboot the app.")
+    if len(_missing) == 3:
+        st.caption("All three are missing, so the Secrets box may have a typing mistake somewhere (for example a curly quote mark "
+                   "or a missing closing quote), which makes the whole box unreadable.")
     st.stop()
 
 
@@ -307,8 +313,8 @@ def _execute(sql, params, fetch):
 def run(sql, params=(), fetch=None):
     """Run one SQL statement and return rows ('all'), one row ('one') or nothing."""
     result = _execute(sql, tuple(params), fetch)
-    # names, pictures and friendships are cached for a few seconds, so forget them whenever they change
-    if re.match(r"\s*(INSERT|UPDATE|DELETE)\b.*\b(users|friendships)\b", sql, re.I | re.S):
+    # names, pictures, friendships and follows are cached for a few seconds, so forget them whenever they change
+    if re.match(r"\s*(INSERT|UPDATE|DELETE)\b.*\b(users|friendships|follows)\b", sql, re.I | re.S):
         st.cache_data.clear()
     return result
 
@@ -336,6 +342,7 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, sender TEXT NOT NULL, receiver TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, is_read INTEGER NOT NULL DEFAULT 0)",
         "CREATE TABLE IF NOT EXISTS reels (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, video_path TEXT NOT NULL, caption TEXT NOT NULL, created_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS reel_likes (reel_id TEXT NOT NULL, username TEXT NOT NULL, PRIMARY KEY (reel_id, username))",
+        "CREATE TABLE IF NOT EXISTS follows (follower TEXT NOT NULL, followee TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (follower, followee))",
         # each person's private conversation with Yuaan
         "CREATE TABLE IF NOT EXISTS ai_messages (id TEXT PRIMARY KEY, username TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)",
     ]
@@ -350,7 +357,7 @@ def init_db():
         run(sql)
     # Supabase also exposes tables through a public web API. Turning row security on (with no rules)
     # shuts that door; this app talks to the database directly, so it is not affected.
-    for name in ("users", "posts", "media", "comments", "sessions", "friendships", "messages", "reels", "reel_likes", "ai_messages"):
+    for name in ("users", "posts", "media", "comments", "sessions", "friendships", "messages", "reels", "reel_likes", "follows", "ai_messages"):
         run(f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY")
     return True
 
@@ -635,6 +642,47 @@ def friend_button(container, me, other, key):
         container.button("Accept", key=key, type="primary", on_click=cb_accept_request, args=(me, other), use_container_width=True)
     else:
         container.button("✓ Friends", key=key, disabled=True, use_container_width=True)
+
+
+# --- followers (one-way: the other person doesn't have to accept) ---
+def is_following(me, other):
+    return cached_run("SELECT 1 FROM follows WHERE follower = ? AND followee = ?", (me, other), "one") is not None
+
+
+def follower_count(user):
+    return run("SELECT COUNT(*) FROM follows WHERE followee = ?", (user,), "one")[0]
+
+
+def following_count(user):
+    return run("SELECT COUNT(*) FROM follows WHERE follower = ?", (user,), "one")[0]
+
+
+def get_followers(user):
+    return [r[0] for r in run("SELECT follower FROM follows WHERE followee = ? ORDER BY created_at DESC", (user,), "all")]
+
+
+def get_following(user):
+    return [r[0] for r in run("SELECT followee FROM follows WHERE follower = ? ORDER BY created_at DESC", (user,), "all")]
+
+
+def cb_toggle_follow(me, other):
+    if me == other:
+        return
+    if run("SELECT 1 FROM follows WHERE follower = ? AND followee = ?", (me, other), "one"):
+        run("DELETE FROM follows WHERE follower = ? AND followee = ?", (me, other))
+    else:
+        run("INSERT OR IGNORE INTO follows (follower, followee, created_at) VALUES (?, ?, ?)",
+            (me, other, datetime.now().isoformat()))
+
+
+def follow_button(container, me, other, key):
+    """➕ Follow / ✓ Following next to someone's post or reel."""
+    if other == me:
+        return
+    if is_following(me, other):
+        container.button("✓ Following", key=key, on_click=cb_toggle_follow, args=(me, other), use_container_width=True)
+    else:
+        container.button("➕ Follow", key=key, type="primary", on_click=cb_toggle_follow, args=(me, other), use_container_width=True)
 
 
 # --- delete your own posts, and profile pages ---
@@ -1150,6 +1198,7 @@ unread_count = count_unread(current_user)
 
 PAGE_LABELS = {
     "feed": "🏠 Feed",
+    "foryou": "✨ For You",
     "reels": "🎬 Reels",
     "friends": "👥 Friends" + (f" ({pending_count} new)" if pending_count else ""),
     "chats": "💬 Chats" + (f" ({unread_count} new)" if unread_count else ""),
@@ -1205,7 +1254,101 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v19")
+    st.caption("Design v21")
+
+# ------------------------------------------
+# Shared by the Feed and For You pages
+# ------------------------------------------
+def fetch_post_extras(post_ids):
+    """Photos and comments for many posts at once (two queries instead of two per post)."""
+    media_by_post, comments_by_post = {}, {}
+    if post_ids:
+        marks = ",".join("?" * len(post_ids))
+        ids = tuple(post_ids)
+        for m_post, m_key, m_type in run(f'SELECT post_id, file_path, file_type FROM media WHERE post_id IN ({marks}) ORDER BY "position"', ids, "all"):
+            media_by_post.setdefault(m_post, []).append((m_key, m_type))
+        for c_post, c_author, c_text in run(f'''SELECT comments.post_id, users.display_name, comments.comment_text
+                                               FROM comments LEFT JOIN users ON comments.author_username = users.username
+                                               WHERE comments.post_id IN ({marks}) ORDER BY comments.created_at ASC''', ids, "all"):
+            comments_by_post.setdefault(c_post, []).append((c_author, c_text))
+    return media_by_post, comments_by_post
+
+
+def render_post_card(idx, post, media_rows, comments, prefix, reason=None):
+    """One post with its buttons and comments. prefix keeps button names unique when a page shows several lists."""
+    post_id, note, created_at, author_username = post[:4]
+    time_str = datetime.fromisoformat(created_at).strftime("%d %b %Y, %H:%M")
+    with st.container(border=True):
+        st.markdown(f'<div style="height:8px;border-radius:8px;background:{T["accents"][idx % len(T["accents"])]};margin-bottom:12px;"></div>',
+                    unsafe_allow_html=True)
+        h_left, h_right, h_right2 = st.columns([4, 2, 2])
+        h_left.markdown(person_html(author_username, size=48, subtitle=f"🕒 {time_str}"), unsafe_allow_html=True)
+        friend_button(h_right, current_user, author_username, f"{prefix}_friend_{post_id}")
+        follow_button(h_right2, current_user, author_username, f"{prefix}_follow_{post_id}")
+        if reason:
+            st.caption(f"✨ {reason}")
+        st.markdown(f'<div style="white-space: pre-wrap; margin: 10px 0;">{html.escape(note)}</div>', unsafe_allow_html=True)
+
+        show_media(media_rows, can_edit=(author_username == current_user), key_prefix=f"{prefix}_{post_id}")
+
+        post_actions(post_id, author_username, current_user, prefix)
+
+        with st.expander(f"💬 comment ({len(comments)} comment)"):
+            for c_author, c_text in comments:
+                st.markdown(f"**{c_author or 'Unknown'}**: {c_text}")
+
+            with st.form(f"comment_form_{prefix}_{post_id}", clear_on_submit=True):
+                new_comment = st.text_input("comment...")
+                if st.form_submit_button("send"):
+                    if new_comment:
+                        run("INSERT INTO comments (id, post_id, author_username, comment_text, created_at) VALUES (?, ?, ?, ?, ?)",
+                            (str(uuid.uuid4()), post_id, current_user, new_comment, datetime.now().isoformat()))
+                        st.rerun()
+
+
+def people_connected_to(circle, me):
+    """People your friends are friends with, or that the people you follow follow."""
+    if not circle:
+        return set()
+    marks = ",".join("?" * len(circle))
+    c = tuple(circle)
+    out = {r[0] for r in run(f"SELECT followee FROM follows WHERE follower IN ({marks})", c, "all")}
+    for a, b in run(f"SELECT requester, addressee FROM friendships WHERE status = 'accepted' "
+                    f"AND (requester IN ({marks}) OR addressee IN ({marks}))", c + c, "all"):
+        out.add(a)
+        out.add(b)
+    return out - set(circle) - {me}
+
+
+def recommend_posts(me, circle, limit=8):
+    """Posts from people you don't know yet, best first: connected to your circle, talked about, with photos, and new.
+    Returns [(post, reason), ...]."""
+    rows = [r for r in run("SELECT id, note, created_at, author_username FROM posts WHERE author_username <> ? "
+                           "ORDER BY created_at DESC LIMIT 100", (me,), "all") if r[3] not in circle]
+    if not rows:
+        return []
+    marks = ",".join("?" * len(rows))
+    ids = tuple(r[0] for r in rows)
+    counts = dict(run(f"SELECT post_id, COUNT(*) FROM comments WHERE post_id IN ({marks}) GROUP BY post_id", ids, "all"))
+    with_media = {r[0] for r in run(f"SELECT DISTINCT post_id FROM media WHERE post_id IN ({marks})", ids, "all")}
+    connected = people_connected_to(circle, me)
+    now = datetime.now()
+    scored = []
+    for row in rows:
+        post_id, _, created_at, author = row
+        age_hours = max((now - datetime.fromisoformat(created_at)).total_seconds() / 3600, 0)
+        talked = counts.get(post_id, 0)
+        score = talked * 2 + (1 if post_id in with_media else 0) + (4 if author in connected else 0) + 6 / (1 + age_hours / 24)
+        if author in connected:
+            reason = "From someone connected to people you know"
+        elif talked:
+            reason = "People are talking about this"
+        else:
+            reason = "New on Yuaan Post"
+        scored.append((score, row, reason))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [(row, reason) for _, row, reason in scored[:limit]]
+
 
 # ------------------------------------------
 # PAGE: Feed
@@ -1257,48 +1400,44 @@ if st.session_state.page == "feed":
     st.header("Latest posts")
 
     posts = run("SELECT id, note, created_at, author_username FROM posts ORDER BY created_at DESC LIMIT 40", fetch="all")
-
-    media_by_post, comments_by_post = {}, {}
-    if posts:
-        marks = ",".join("?" * len(posts))
-        ids = tuple(p[0] for p in posts)
-        for m_post, m_key, m_type in run(f'SELECT post_id, file_path, file_type FROM media WHERE post_id IN ({marks}) ORDER BY "position"', ids, "all"):
-            media_by_post.setdefault(m_post, []).append((m_key, m_type))
-        for c_post, c_author, c_text in run(f'''SELECT comments.post_id, users.display_name, comments.comment_text
-                                               FROM comments LEFT JOIN users ON comments.author_username = users.username
-                                               WHERE comments.post_id IN ({marks}) ORDER BY comments.created_at ASC''', ids, "all"):
-            comments_by_post.setdefault(c_post, []).append((c_author, c_text))
-    else:
+    if not posts:
         st.info("Nothing here yet. Write the first post above.")
+    media_by_post, comments_by_post = fetch_post_extras([p[0] for p in posts])
+    for idx, post in enumerate(posts):
+        render_post_card(idx, post, media_by_post.get(post[0], []), comments_by_post.get(post[0], []), "feed")
 
-    for idx, (post_id, note, created_at, author_username) in enumerate(posts):
-        media_rows = media_by_post.get(post_id, [])
-        time_str = datetime.fromisoformat(created_at).strftime("%d %b %Y, %H:%M")
+# ------------------------------------------
+# PAGE: For You (friends' and followed people's posts, plus posts you may like)
+# ------------------------------------------
+elif st.session_state.page == "foryou":
+    banner("For You", "Posts from your friends and people you follow, plus posts you may like.", "foryou")
 
-        with st.container(border=True):
-            st.markdown(f'<div style="height:8px;border-radius:8px;background:{T["accents"][idx % len(T["accents"])]};margin-bottom:12px;"></div>',
-                        unsafe_allow_html=True)
-            h_left, h_right = st.columns([5, 2])
-            h_left.markdown(person_html(author_username, size=48, subtitle=f"🕒 {time_str}"), unsafe_allow_html=True)
-            friend_button(h_right, current_user, author_username, f"postfriend_{post_id}")
-            st.markdown(f'<div style="white-space: pre-wrap; margin: 10px 0;">{html.escape(note)}</div>', unsafe_allow_html=True)
+    circle = set(get_friends(current_user)) | set(get_following(current_user))
+    circle.discard(current_user)
 
-            show_media(media_rows, can_edit=(author_username == current_user), key_prefix=f"feed_{post_id}")
+    friend_posts = []
+    if circle:
+        marks = ",".join("?" * len(circle))
+        friend_posts = run(f"SELECT id, note, created_at, author_username FROM posts WHERE author_username IN ({marks}) "
+                           "ORDER BY created_at DESC LIMIT 15", tuple(circle), "all")
+    suggestions = recommend_posts(current_user, circle)
 
-            post_actions(post_id, author_username, current_user, "feed")
+    media_by_post, comments_by_post = fetch_post_extras([p[0] for p in friend_posts] + [p[0][0] for p in suggestions])
 
-            comments = comments_by_post.get(post_id, [])
-            with st.expander(f"💬 comment ({len(comments)} comment)"):
-                for c_author, c_text in comments:
-                    st.markdown(f"**{c_author or 'Unknown'}**: {c_text}")
+    st.header("From your friends")
+    if not circle:
+        st.info("Add friends in 👥 Friends or tap ➕ Follow on a post, and their posts will show up here.")
+    elif not friend_posts:
+        st.caption("Your friends and the people you follow haven't posted yet.")
+    for idx, post in enumerate(friend_posts):
+        render_post_card(idx, post, media_by_post.get(post[0], []), comments_by_post.get(post[0], []), "fyf")
 
-                with st.form(f"comment_form_{post_id}", clear_on_submit=True):
-                    new_comment = st.text_input("comment...")
-                    if st.form_submit_button("send"):
-                        if new_comment:
-                            run("INSERT INTO comments (id, post_id, author_username, comment_text, created_at) VALUES (?, ?, ?, ?, ?)",
-                                (str(uuid.uuid4()), post_id, current_user, new_comment, datetime.now().isoformat()))
-                            st.rerun()
+    st.header("Posts you may like")
+    st.caption("A mix of new posts, posts people are talking about, and posts from people connected to your friends.")
+    if not suggestions:
+        st.caption("Nothing to suggest yet. Come back when more people have posted.")
+    for idx, (post, reason) in enumerate(suggestions):
+        render_post_card(idx, post, media_by_post.get(post[0], []), comments_by_post.get(post[0], []), "fyr", reason=reason)
 
 # ------------------------------------------
 # PAGE: Reels (short videos, one at a time)
@@ -1341,9 +1480,10 @@ elif st.session_state.page == "reels":
         time_str = datetime.fromisoformat(created_at).strftime("%d %b %Y, %H:%M")
 
         with st.container(border=True):
-            h_left, h_right = st.columns([5, 2])
+            h_left, h_right, h_right2 = st.columns([4, 2, 2])
             h_left.markdown(person_html(author, size=48, subtitle=f"🕒 {time_str}"), unsafe_allow_html=True)
             friend_button(h_right, current_user, author, f"reelfriend_{reel_id}")
+            follow_button(h_right2, current_user, author, f"reelfollow_{reel_id}")
             st.video(file_url(video_path), loop=True, autoplay=True, muted=True)
             if caption:
                 st.markdown(f'<div style="white-space: pre-wrap; margin: 6px 0;">{html.escape(caption)}</div>', unsafe_allow_html=True)
@@ -1472,18 +1612,37 @@ elif st.session_state.page == "profile":
         st.markdown(avatar_html(target, size=96), unsafe_allow_html=True)
 
         n_posts = run("SELECT COUNT(*) FROM posts WHERE author_username = ?", (target,), "one")[0]
-        n_reels = len([r for r in get_reels() if r[1] == target])
         n_friends = len(get_friends(target))
-        m1, m2, m3 = st.columns(3)
+        n_followers, n_following = follower_count(target), following_count(target)
+        m1, m2, m3, m4 = st.columns(4)
         m1.metric("Posts", n_posts)
-        m2.metric("Reels", n_reels)
-        m3.metric("Friends", n_friends)
+        m2.metric("Followers", n_followers)
+        m3.metric("Following", n_following)
+        m4.metric("Friends", n_friends)
 
         if target != current_user:
-            b1, b2 = st.columns(2)
-            friend_button(b1, current_user, target, "prof_friend")
+            b1, b2, b3 = st.columns(3)
+            follow_button(b1, current_user, target, "prof_follow")
+            friend_button(b2, current_user, target, "prof_friend")
             if friendship_status(current_user, target) == "friends":
-                b2.button("💬 Message", key="prof_msg", on_click=cb_open_chat, args=(target,), use_container_width=True)
+                b3.button("💬 Message", key="prof_msg", on_click=cb_open_chat, args=(target,), use_container_width=True)
+
+        with st.expander(f"Followers ({n_followers})"):
+            people = get_followers(target)
+            if not people:
+                st.caption("No followers yet.")
+            for u in people:
+                c1, c2 = st.columns([5, 2])
+                c1.markdown(person_html(u), unsafe_allow_html=True)
+                c2.button("👤 Profile", key=f"pf_fol_{u}", on_click=cb_view_profile, args=(u,))
+        with st.expander(f"Following ({n_following})"):
+            people = get_following(target)
+            if not people:
+                st.caption("Not following anyone yet.")
+            for u in people:
+                c1, c2 = st.columns([5, 2])
+                c1.markdown(person_html(u), unsafe_allow_html=True)
+                c2.button("👤 Profile", key=f"pf_fng_{u}", on_click=cb_view_profile, args=(u,))
 
         tab_posts, tab_reels = st.tabs(["Posts", "Reels"])
         with tab_posts:
