@@ -345,6 +345,12 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS follows (follower TEXT NOT NULL, followee TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (follower, followee))",
         # each person's private conversation with Yuaan
         "CREATE TABLE IF NOT EXISTS ai_messages (id TEXT PRIMARY KEY, username TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)",
+        # group chats
+        "CREATE TABLE IF NOT EXISTS group_chats (id TEXT PRIMARY KEY, name TEXT NOT NULL, creator TEXT NOT NULL, created_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS group_members (group_id TEXT NOT NULL, username TEXT NOT NULL, PRIMARY KEY (group_id, username))",
+        "CREATE TABLE IF NOT EXISTS group_messages (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL)",
+        # when each member last opened each group (drives read / unread and "seen by")
+        "CREATE TABLE IF NOT EXISTS group_reads (group_id TEXT NOT NULL, username TEXT NOT NULL, last_read_at TEXT NOT NULL, PRIMARY KEY (group_id, username))",
     ]
     for sql in tables:
         run(sql)
@@ -353,11 +359,14 @@ def init_db():
                 "CREATE INDEX IF NOT EXISTS idx_media_post ON media (post_id)",
                 "CREATE INDEX IF NOT EXISTS idx_comments_post ON comments (post_id)",
                 "CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages (sender, receiver)",
-                "CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages (receiver, is_read)"):
+                "CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages (receiver, is_read)",
+                "CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members (username)",
+                "CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages (group_id, created_at)"):
         run(sql)
     # Supabase also exposes tables through a public web API. Turning row security on (with no rules)
     # shuts that door; this app talks to the database directly, so it is not affected.
-    for name in ("users", "posts", "media", "comments", "sessions", "friendships", "messages", "reels", "reel_likes", "follows", "ai_messages"):
+    for name in ("users", "posts", "media", "comments", "sessions", "friendships", "messages", "reels", "reel_likes", "follows", "ai_messages",
+                 "group_chats", "group_members", "group_messages", "group_reads"):
         run(f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY")
     return True
 
@@ -753,6 +762,17 @@ def count_unread(me):
     return run("SELECT COUNT(*) FROM messages WHERE receiver = ? AND is_read = 0", (me,), "one")[0]
 
 
+CALL_TAG = "[[CALL]]"
+
+
+def start_call(me, other):
+    """Makes a private call room and drops the join link into the chat."""
+    room = "YuaanPost-" + uuid.uuid4().hex
+    url = f"https://meet.jit.si/{room}#config.startWithVideoMuted=true&config.disableDeepLinking=true"
+    send_message(me, other, CALL_TAG + url)
+    return url
+
+
 def send_message(me, other, text):
     run("INSERT INTO messages (id, sender, receiver, text, created_at, is_read) VALUES (?, ?, ?, ?, ?, 0)",
         (str(uuid.uuid4()), me, other, text, datetime.now().isoformat()))
@@ -776,7 +796,129 @@ def render_messages(me, other):
             with st.chat_message(role, avatar=avatar):
                 time_str = datetime.fromisoformat(created_at).strftime("%d %b, %H:%M")
                 st.caption(f"{get_display_name(sender)} · {time_str}")
-                st.write(text)
+                if text.startswith(CALL_TAG):
+                    age_min = (datetime.now() - datetime.fromisoformat(created_at)).total_seconds() / 60
+                    if age_min <= 30:
+                        who = "You started" if sender == me else f"{get_display_name(sender)} is starting"
+                        st.write(f"📞 {who} a voice call")
+                        st.link_button("📞 Join call", text[len(CALL_TAG):], key=f"join_{sender}_{created_at}")
+                    else:
+                        st.write("📞 Voice call (ended)")
+                else:
+                    st.write(text)
+
+
+# --- group chats ---
+def my_groups(me):
+    return run('''SELECT g.id, g.name FROM group_chats g JOIN group_members m ON m.group_id = g.id
+                  WHERE m.username = ? ORDER BY g.created_at DESC''', (me,), "all")
+
+
+def group_members(gid):
+    return [r[0] for r in run("SELECT username FROM group_members WHERE group_id = ? ORDER BY username", (gid,), "all")]
+
+
+def send_group_message(me, gid, text):
+    if me in group_members(gid):
+        run("INSERT INTO group_messages (id, group_id, sender, text, created_at) VALUES (?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), gid, me, text, datetime.now().isoformat()))
+
+
+def start_group_call(me, gid):
+    room = "YuaanPost-" + uuid.uuid4().hex
+    url = f"https://meet.jit.si/{room}#config.startWithVideoMuted=true&config.disableDeepLinking=true"
+    send_group_message(me, gid, CALL_TAG + url)
+
+
+def cb_create_group(me):
+    name = (st.session_state.get("new_group_name") or "").strip()[:40]
+    picked = [u for u in st.session_state.get("new_group_members", []) if u in get_friends(me)]
+    if not name:
+        st.toast("Give the group a name first.", icon="⚠️")
+        return
+    if not picked:
+        st.toast("Pick at least one friend.", icon="⚠️")
+        return
+    gid = str(uuid.uuid4())
+    run("INSERT INTO group_chats (id, name, creator, created_at) VALUES (?, ?, ?, ?)",
+        (gid, name, me, datetime.now().isoformat()))
+    for u in [me] + picked:
+        run("INSERT OR IGNORE INTO group_members (group_id, username) VALUES (?, ?)", (gid, u))
+    st.session_state.new_group_name = ""
+    st.session_state.new_group_members = []
+    st.session_state.chat_group = gid
+    st.toast(f"Group “{name}” created", icon="👥")
+
+
+def cb_add_group_members(me, gid):
+    if me not in group_members(gid):
+        return
+    for u in st.session_state.get(f"add_members_{gid}", []):
+        if u in get_friends(me):
+            run("INSERT OR IGNORE INTO group_members (group_id, username) VALUES (?, ?)", (gid, u))
+    st.session_state[f"add_members_{gid}"] = []
+    st.toast("Added to the group", icon="➕")
+
+
+def cb_leave_group(me, gid):
+    run("DELETE FROM group_members WHERE group_id = ? AND username = ?", (gid, me))
+    run("DELETE FROM group_reads WHERE group_id = ? AND username = ?", (gid, me))
+    if not group_members(gid):   # last person left: remove the group
+        run("DELETE FROM group_messages WHERE group_id = ?", (gid,))
+        run("DELETE FROM group_chats WHERE id = ?", (gid,))
+    st.session_state.pop("chat_group", None)
+    st.toast("You left the group", icon="👋")
+
+
+def group_unread_counts(me):
+    """{group_id: number of messages from others that I haven't opened yet}"""
+    rows = run('''SELECT m.group_id, COUNT(*) FROM group_messages m
+                  JOIN group_members gm ON gm.group_id = m.group_id AND gm.username = ?
+                  LEFT JOIN group_reads r ON r.group_id = m.group_id AND r.username = ?
+                  WHERE m.sender <> ? AND (r.last_read_at IS NULL OR m.created_at > r.last_read_at)
+                  GROUP BY m.group_id''', (me, me, me), "all")
+    return dict(rows)
+
+
+def mark_group_read(me, gid):
+    run('''INSERT INTO group_reads (group_id, username, last_read_at) VALUES (?, ?, ?)
+           ON CONFLICT (group_id, username) DO UPDATE SET last_read_at = excluded.last_read_at''',
+        (gid, me, datetime.now().isoformat()))
+
+
+@st.fragment(run_every=3)
+def render_group_messages(me, gid):
+    mark_group_read(me, gid)   # opening the chat counts as reading everything in it
+    members = group_members(gid)
+    seen_at = dict(run("SELECT username, last_read_at FROM group_reads WHERE group_id = ?", (gid,), "all"))
+    rows = run('''SELECT sender, text, created_at FROM group_messages WHERE group_id = ?
+                  ORDER BY created_at DESC LIMIT 80''', (gid,), "all")
+    rows.reverse()
+    with st.container(height=420):
+        if not rows:
+            st.caption("No messages yet. Say hi to the group! 👋")
+        for sender, text, created_at in rows:
+            avatar = get_avatar_path(sender) or "👤"
+            readers = [u for u in members if u != sender and seen_at.get(u, "") >= created_at]
+            others = len(members) - 1
+            with st.chat_message("user" if sender == me else "assistant", avatar=avatar):
+                st.caption(f"{get_display_name(sender)} · {datetime.fromisoformat(created_at).strftime('%d %b, %H:%M')}")
+                if text.startswith(CALL_TAG):
+                    age_min = (datetime.now() - datetime.fromisoformat(created_at)).total_seconds() / 60
+                    if age_min <= 30:
+                        st.write("📞 Group voice call")
+                        st.link_button("📞 Join call", text[len(CALL_TAG):], key=f"gjoin_{gid}_{sender}_{created_at}")
+                    else:
+                        st.write("📞 Voice call (ended)")
+                else:
+                    st.write(text)
+                if others > 0:
+                    if sender == me:
+                        names = ", ".join(get_display_name(u) for u in readers)
+                        label = f"✓✓ Read by {len(readers)} of {others}" if readers else "✓ Sent · not read yet"
+                        st.caption(label + (f" ({names})" if readers and len(readers) < 6 else ""))
+                    else:
+                        st.caption(f"👁 Read by {len(readers)} of {others}")
 
 
 # --- reels ---
@@ -1076,12 +1218,16 @@ def ask_gemini(turns, name):
         return None
     st.session_state.yuaan_status = ""
     try:
-        resp = requests.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent",
-            headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-            json={"system_instruction": {"parts": [{"text": YUAAN_SYSTEM + f" The person's name is {name}."}]},
-                  "contents": contents, "generationConfig": {"maxOutputTokens": 400}},
-            timeout=20)
+        resp = None
+        for model in ("gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash-lite"):
+            resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                json={"system_instruction": {"parts": [{"text": YUAAN_SYSTEM + f" The person's name is {name}."}]},
+                      "contents": contents, "generationConfig": {"maxOutputTokens": 400}},
+                timeout=20)
+            if resp.status_code not in (429, 404):
+                break
         if resp.status_code != 200:
             try:
                 why = resp.json()["error"]["message"][:200]
@@ -1254,7 +1400,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v21")
+    st.caption("Design v26")
 
 # ------------------------------------------
 # Shared by the Feed and For You pages
@@ -1348,6 +1494,74 @@ def recommend_posts(me, circle, limit=8):
         scored.append((score, row, reason))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [(row, reason) for _, row, reason in scored[:limit]]
+
+
+# ------------------------------------------
+# Incoming call: red banner + ringtone on any page
+# ------------------------------------------
+def make_ringtone():
+    """A phone-style ring (two short bursts, then a pause) as WAV bytes."""
+    import wave, math, struct
+    rate = 8000
+    frames = bytearray()
+    def tone(freqs, secs):
+        for i in range(int(rate * secs)):
+            v = sum(math.sin(2 * math.pi * f * i / rate) for f in freqs) / len(freqs)
+            frames.extend(struct.pack("<h", int(v * 0.6 * 32767)))
+    def quiet(secs):
+        frames.extend(b"\x00\x00" * int(rate * secs))
+    for _ in range(2):
+        tone((440, 480), 0.4)
+        quiet(0.2)
+    quiet(1.2)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+        w.writeframes(bytes(frames))
+    return buf.getvalue()
+
+
+@st.cache_resource
+def ringtone_bytes():
+    return make_ringtone()
+
+
+def cb_decline_call(call_id):
+    st.session_state.setdefault("dismissed_calls", set()).add(call_id)
+
+
+@st.fragment(run_every=3)
+def incoming_call_watcher(me):
+    cutoff = (datetime.now() - timedelta(seconds=45)).isoformat()
+    dismissed = st.session_state.get("dismissed_calls", set())
+    found = None
+    row = run("SELECT id, sender, text FROM messages WHERE receiver = ? AND text LIKE ? AND created_at > ? "
+              "ORDER BY created_at DESC LIMIT 1", (me, CALL_TAG + "%", cutoff), "one")
+    if row and row[0] not in dismissed:
+        found = (row[0], row[2], f"{get_display_name(row[1])} is calling you...")
+    if not found:
+        grow = run('''SELECT m.id, m.sender, m.text, g.name FROM group_messages m
+                      JOIN group_members gm ON gm.group_id = m.group_id
+                      JOIN group_chats g ON g.id = m.group_id
+                      WHERE gm.username = ? AND m.sender <> ? AND m.text LIKE ? AND m.created_at > ?
+                      ORDER BY m.created_at DESC LIMIT 1''', (me, me, CALL_TAG + "%", cutoff), "one")
+        if grow and grow[0] not in dismissed:
+            found = (grow[0], grow[2], f"{get_display_name(grow[1])} started a call in {grow[3]}")
+    if not found:
+        return
+    call_id, text, title = found
+    with st.container(border=True):
+        st.markdown(f"### 📞 {title}")
+        st.audio(ringtone_bytes(), format="audio/wav", autoplay=True, loop=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.link_button("✅ Answer", text[len(CALL_TAG):], use_container_width=True)
+        with c2:
+            st.button("❌ Decline", key=f"decline_{call_id}", on_click=cb_decline_call,
+                      args=(call_id,), use_container_width=True)
+
+
+incoming_call_watcher(current_user)
 
 
 # ------------------------------------------
@@ -1573,10 +1787,57 @@ elif st.session_state.page == "friends":
 # PAGE: Chats
 # ------------------------------------------
 elif st.session_state.page == "chats":
-    banner("Chats", "Pick a friend and send a message.", "chats")
+    banner("Chats", "Message a friend or make a group.", "chats")
     friends = get_friends(current_user)
+    chat_mode = st.radio("Chat type", ["💬 Friends", "👥 Groups"], horizontal=True,
+                         key="chat_mode", label_visibility="collapsed")
 
-    if not friends:
+    if chat_mode == "👥 Groups":
+        groups = my_groups(current_user)
+        with st.expander("➕ New group", expanded=not groups):
+            if not friends:
+                st.info("Add a friend in 👥 Friends first, then you can make a group.")
+            else:
+                st.text_input("Group name", key="new_group_name", max_chars=40)
+                st.multiselect("Add friends", friends, format_func=lambda u: f"{get_display_name(u)} (@{u})",
+                               key="new_group_members")
+                st.button("Create group", key="create_group_btn", on_click=cb_create_group, args=(current_user,))
+        if groups:
+            ids = [g[0] for g in groups]
+            names = dict(groups)
+            if st.session_state.get("chat_group") not in ids:
+                st.session_state.pop("chat_group", None)
+            unread_groups = group_unread_counts(current_user)
+            open_group = st.session_state.get("chat_group")
+
+            def group_label(i):
+                n = 0 if i == open_group else unread_groups.get(i, 0)
+                return names[i] + (f"  •  {n} new" if n else "")
+
+            gid = st.selectbox("Group", ids, format_func=group_label, key="chat_group")
+            members = group_members(gid)
+            st.caption("Members: " + ", ".join(get_display_name(u) for u in members))
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("📞 Group call", key="start_group_call_btn", use_container_width=True):
+                    start_group_call(current_user, gid)
+                    st.toast("Calling the group... tap 'Join call' in the chat.", icon="📞")
+                    st.rerun()
+            with b2:
+                st.button("🚪 Leave group", key=f"leave_{gid}", on_click=cb_leave_group,
+                          args=(current_user, gid), use_container_width=True)
+            addable = [u for u in friends if u not in members]
+            if addable:
+                with st.expander("Add more friends"):
+                    st.multiselect("Friends to add", addable, format_func=lambda u: f"{get_display_name(u)} (@{u})",
+                                   key=f"add_members_{gid}")
+                    st.button("Add", key=f"add_btn_{gid}", on_click=cb_add_group_members, args=(current_user, gid))
+            render_group_messages(current_user, gid)
+            gprompt = st.chat_input(f"Message {names[gid]}...")
+            if gprompt and gprompt.strip():
+                send_group_message(current_user, gid, gprompt.strip())
+                st.rerun()
+    elif not friends:
         st.info("You need a friend to chat with. Go to 👥 Friends and add someone by username.")
     else:
         if st.session_state.get("chat_with") not in friends:
@@ -1591,6 +1852,10 @@ elif st.session_state.page == "chats":
         other = st.selectbox("Chat with", friends, format_func=friend_label, key="chat_with")
 
         st.markdown(person_html(other, size=36), unsafe_allow_html=True)
+        if st.button(f"📞 Voice call {get_display_name(other)}", key="start_call_btn"):
+            start_call(current_user, other)
+            st.toast("Calling... tap 'Join call' in the chat below.", icon="📞")
+            st.rerun()
         render_messages(current_user, other)
 
         prompt = st.chat_input(f"Message {get_display_name(other)}...")
