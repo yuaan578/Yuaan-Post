@@ -948,6 +948,17 @@ def start_group_call(me, gid, link):
     send_group_message(me, gid, CALL_TAG + link)
 
 
+def cb_send_meet_link(key, send):
+    """Runs before the page redraws, so it may safely clear the text box."""
+    link = clean_meet_link(st.session_state.get(f"{key}_link"))
+    if link:
+        send(link)
+        st.session_state[f"{key}_link"] = ""
+        st.toast("Call sent. Now tap 'Join call' in the chat.", icon="📞")
+    else:
+        st.session_state[f"{key}_err"] = True
+
+
 def call_ui(key, send):
     """Instant call, or two steps: open Google Meet to make a meeting, then paste its link so friends get a Join button."""
     if st.button("⚡ Instant call (one tap, nobody needs an account)", key=f"{key}_instant", use_container_width=True):
@@ -957,15 +968,9 @@ def call_ui(key, send):
     st.caption("Or use Google Meet:")
     st.link_button("1️⃣ Open Google Meet (makes a new meeting)", MEET_NEW_URL, use_container_width=True)
     link_in = st.text_input("2️⃣ Paste the meeting link here", key=f"{key}_link", placeholder="https://meet.google.com/abc-defg-hij")
-    if st.button("📞 Send call to chat", key=f"{key}_send"):
-        link = clean_meet_link(link_in)
-        if link:
-            send(link)
-            st.session_state[f"{key}_link"] = ""
-            st.toast("Call sent. Now tap 'Join call' in the chat.", icon="📞")
-            st.rerun()
-        else:
-            st.warning("That doesn't look like a Google Meet link. It should look like meet.google.com/abc-defg-hij")
+    st.button("📞 Send call to chat", key=f"{key}_send", on_click=cb_send_meet_link, args=(key, send))
+    if st.session_state.pop(f"{key}_err", False):
+        st.warning("That doesn't look like a Google Meet link. It should look like meet.google.com/abc-defg-hij")
 
 
 def cb_create_group(me):
@@ -1550,7 +1555,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v32")
+    st.caption("Design v33")
 
 # ------------------------------------------
 # Shared by the Feed and For You pages
