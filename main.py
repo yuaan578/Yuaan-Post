@@ -13,8 +13,17 @@ import psycopg2
 from urllib.parse import quote, unquote
 import psycopg2.pool
 from psycopg2.pool import ThreadedConnectionPool
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from PIL import Image, ImageOps
+
+def utc_now():
+    """Times are stored in UTC (the same on any server) and shown in Thai time."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def thai_time(iso, fmt):
+    return (datetime.fromisoformat(iso) + timedelta(hours=7)).strftime(fmt)
+
 
 # ==========================================
 # 1. Setup
@@ -460,14 +469,14 @@ def get_theme_value(username):
 # --- login sessions (keeps you logged in after refresh) ---
 def create_session(username):
     token = uuid.uuid4().hex + uuid.uuid4().hex
-    expires_at = (datetime.now() + timedelta(days=SESSION_DAYS)).isoformat()
-    run("DELETE FROM sessions WHERE expires_at < ?", (datetime.now().isoformat(),))
+    expires_at = (utc_now() + timedelta(days=SESSION_DAYS)).isoformat()
+    run("DELETE FROM sessions WHERE expires_at < ?", (utc_now().isoformat(),))
     run("INSERT INTO sessions (token, username, expires_at) VALUES (?, ?, ?)", (token, username, expires_at))
     return token
 
 
 def get_session_user(token):
-    row = run("SELECT username FROM sessions WHERE token = ? AND expires_at > ?", (token, datetime.now().isoformat()), "one")
+    row = run("SELECT username FROM sessions WHERE token = ? AND expires_at > ?", (token, utc_now().isoformat()), "one")
     return row[0] if row else None
 
 
@@ -625,7 +634,7 @@ def get_incoming_requests(me):
 def cb_send_request(me, other):
     if friendship_status(me, other) == "none":
         run("INSERT INTO friendships (id, requester, addressee, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
-            (str(uuid.uuid4()), me, other, datetime.now().isoformat()))
+            (str(uuid.uuid4()), me, other, utc_now().isoformat()))
 
 
 def cb_accept_request(me, other):
@@ -681,7 +690,7 @@ def cb_toggle_follow(me, other):
         run("DELETE FROM follows WHERE follower = ? AND followee = ?", (me, other))
     else:
         run("INSERT OR IGNORE INTO follows (follower, followee, created_at) VALUES (?, ?, ?)",
-            (me, other, datetime.now().isoformat()))
+            (me, other, utc_now().isoformat()))
 
 
 def follow_button(container, me, other, key):
@@ -794,7 +803,7 @@ def start_call(me, other, link):
 
 def send_message(me, other, text):
     run("INSERT INTO messages (id, sender, receiver, text, created_at, is_read) VALUES (?, ?, ?, ?, ?, 0)",
-        (str(uuid.uuid4()), me, other, text, datetime.now().isoformat()))
+        (str(uuid.uuid4()), me, other, text, utc_now().isoformat()))
 
 
 @st.fragment(run_every=3)
@@ -813,10 +822,10 @@ def render_messages(me, other):
             avatar = get_avatar_path(sender) or "👤"
             role = "user" if sender == me else "assistant"
             with st.chat_message(role, avatar=avatar):
-                time_str = datetime.fromisoformat(created_at).strftime("%d %b, %H:%M")
+                time_str = thai_time(created_at, "%d %b, %H:%M")
                 st.caption(f"{get_display_name(sender)} · {time_str}")
                 if text.startswith(CALL_TAG):
-                    age_min = (datetime.now() - datetime.fromisoformat(created_at)).total_seconds() / 60
+                    age_min = (utc_now() - datetime.fromisoformat(created_at)).total_seconds() / 60
                     if age_min <= 30:
                         who = "You started" if sender == me else f"{get_display_name(sender)} is starting"
                         st.write(f"📞 {who} a voice call")
@@ -842,7 +851,7 @@ def group_members(gid):
 def send_group_message(me, gid, text):
     if me in group_members(gid):
         run("INSERT INTO group_messages (id, group_id, sender, text, created_at) VALUES (?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), gid, me, text, datetime.now().isoformat()))
+            (str(uuid.uuid4()), gid, me, text, utc_now().isoformat()))
 
 
 def start_group_call(me, gid, link):
@@ -880,7 +889,7 @@ def cb_create_group(me):
         return
     gid = str(uuid.uuid4())
     run("INSERT INTO group_chats (id, name, creator, created_at) VALUES (?, ?, ?, ?)",
-        (gid, name, me, datetime.now().isoformat()))
+        (gid, name, me, utc_now().isoformat()))
     for u in [me] + picked:
         run("INSERT OR IGNORE INTO group_members (group_id, username) VALUES (?, ?)", (gid, u))
     st.session_state.new_group_name = ""
@@ -922,7 +931,7 @@ def group_unread_counts(me):
 def mark_group_read(me, gid):
     run('''INSERT INTO group_reads (group_id, username, last_read_at) VALUES (?, ?, ?)
            ON CONFLICT (group_id, username) DO UPDATE SET last_read_at = excluded.last_read_at''',
-        (gid, me, datetime.now().isoformat()))
+        (gid, me, utc_now().isoformat()))
 
 
 @st.fragment(run_every=3)
@@ -941,9 +950,9 @@ def render_group_messages(me, gid):
             readers = [u for u in members if u != sender and seen_at.get(u, "") >= created_at]
             others = len(members) - 1
             with st.chat_message("user" if sender == me else "assistant", avatar=avatar):
-                st.caption(f"{get_display_name(sender)} · {datetime.fromisoformat(created_at).strftime('%d %b, %H:%M')}")
+                st.caption(f"{get_display_name(sender)} · {thai_time(created_at, '%d %b, %H:%M')}")
                 if text.startswith(CALL_TAG):
-                    age_min = (datetime.now() - datetime.fromisoformat(created_at)).total_seconds() / 60
+                    age_min = (utc_now() - datetime.fromisoformat(created_at)).total_seconds() / 60
                     if age_min <= 30:
                         st.write("📞 Group voice call")
                         st.link_button("📞 Join call", text[len(CALL_TAG):], key=f"gjoin_{gid}_{sender}_{created_at}")
@@ -1234,7 +1243,7 @@ YUAAN_SYSTEM = ("You are Yuaan, a friendly helper inside a small social app call
 
 
 def ai_used_today(username):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = utc_now().strftime("%Y-%m-%d")
     row = run("SELECT COUNT(*) FROM ai_messages WHERE username = ? AND role = 'user' AND created_at >= ?",
               (username, today), "one")
     return row[0] if row else 0
@@ -1441,7 +1450,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v30")
+    st.caption("Design v31")
 
 # ------------------------------------------
 # Shared by the Feed and For You pages
@@ -1464,7 +1473,7 @@ def fetch_post_extras(post_ids):
 def render_post_card(idx, post, media_rows, comments, prefix, reason=None):
     """One post with its buttons and comments. prefix keeps button names unique when a page shows several lists."""
     post_id, note, created_at, author_username = post[:4]
-    time_str = datetime.fromisoformat(created_at).strftime("%d %b %Y, %H:%M")
+    time_str = thai_time(created_at, "%d %b %Y, %H:%M")
     with st.container(border=True):
         st.markdown(f'<div style="height:8px;border-radius:8px;background:{T["accents"][idx % len(T["accents"])]};margin-bottom:12px;"></div>',
                     unsafe_allow_html=True)
@@ -1489,7 +1498,7 @@ def render_post_card(idx, post, media_rows, comments, prefix, reason=None):
                 if st.form_submit_button("send"):
                     if new_comment:
                         run("INSERT INTO comments (id, post_id, author_username, comment_text, created_at) VALUES (?, ?, ?, ?, ?)",
-                            (str(uuid.uuid4()), post_id, current_user, new_comment, datetime.now().isoformat()))
+                            (str(uuid.uuid4()), post_id, current_user, new_comment, utc_now().isoformat()))
                         st.rerun()
 
 
@@ -1519,7 +1528,7 @@ def recommend_posts(me, circle, limit=8):
     counts = dict(run(f"SELECT post_id, COUNT(*) FROM comments WHERE post_id IN ({marks}) GROUP BY post_id", ids, "all"))
     with_media = {r[0] for r in run(f"SELECT DISTINCT post_id FROM media WHERE post_id IN ({marks})", ids, "all")}
     connected = people_connected_to(circle, me)
-    now = datetime.now()
+    now = utc_now()
     scored = []
     for row in rows:
         post_id, _, created_at, author = row
@@ -1573,7 +1582,7 @@ def cb_decline_call(call_id):
 
 @st.fragment(run_every=3)
 def incoming_call_watcher(me):
-    cutoff = (datetime.now() - timedelta(seconds=45)).isoformat()
+    cutoff = (utc_now() - timedelta(seconds=45)).isoformat()
     dismissed = st.session_state.get("dismissed_calls", set())
     found = None
     row = run("SELECT id, sender, text FROM messages WHERE receiver = ? AND text LIKE ? AND created_at > ? "
@@ -1620,7 +1629,7 @@ if st.session_state.page == "feed":
         if submit_button:
             if note:
                 post_id = str(uuid.uuid4())
-                created_at = datetime.now().isoformat()
+                created_at = utc_now().isoformat()
                 saved_files = []  # (key, mime type)
                 problem = None
                 with st.spinner("Posting..."):
@@ -1717,7 +1726,7 @@ elif st.session_state.page == "reels":
                         with st.spinner("Uploading your reel..."):
                             reel_key = upload_file(reel_file.getvalue(), "reels", ext, mime)
                         run("INSERT INTO reels (id, author_username, video_path, caption, created_at) VALUES (?, ?, ?, ?, ?)",
-                            (reel_id, current_user, reel_key, reel_caption.strip(), datetime.now().isoformat()))
+                            (reel_id, current_user, reel_key, reel_caption.strip(), utc_now().isoformat()))
                         st.session_state.reel_idx = 0  # show the new reel first
                         st.rerun()
                     except (RuntimeError, requests.RequestException):
@@ -1732,7 +1741,7 @@ elif st.session_state.page == "reels":
         st.session_state.reel_idx = idx
         reel_id, author, video_path, caption, created_at = reels[idx]
         like_count, liked = reel_likes(reel_id, current_user)
-        time_str = datetime.fromisoformat(created_at).strftime("%d %b %Y, %H:%M")
+        time_str = thai_time(created_at, "%d %b %Y, %H:%M")
 
         with st.container(border=True):
             h_left, h_right, h_right2 = st.columns([4, 2, 2])
@@ -1768,7 +1777,7 @@ elif st.session_state.page == "reels":
                     if st.form_submit_button("send"):
                         if new_reel_comment:
                             run("INSERT INTO comments (id, post_id, author_username, comment_text, created_at) VALUES (?, ?, ?, ?, ?)",
-                                (str(uuid.uuid4()), reel_id, current_user, new_reel_comment, datetime.now().isoformat()))
+                                (str(uuid.uuid4()), reel_id, current_user, new_reel_comment, utc_now().isoformat()))
                             st.rerun()
 
 # ------------------------------------------
@@ -1950,7 +1959,7 @@ elif st.session_state.page == "profile":
                 st.caption("No posts yet.")
             for p_id, p_note, p_created in their_posts:
                 with st.container(border=True):
-                    st.caption(f"🕒 {datetime.fromisoformat(p_created).strftime('%d %b %Y, %H:%M')}")
+                    st.caption(f"🕒 {thai_time(p_created, '%d %b %Y, %H:%M')}")
                     st.markdown(f'<div style="white-space: pre-wrap; margin: 6px 0;">{html.escape(p_note)}</div>', unsafe_allow_html=True)
                     show_media(run("SELECT file_path, file_type FROM media WHERE post_id = ? ORDER BY \"position\"", (p_id,), "all"),
                                can_edit=(target == current_user), key_prefix=f"prof_{p_id}")
@@ -2000,9 +2009,9 @@ elif st.session_state.page == "yuaan":
         with st.chat_message("assistant", avatar="🤖"):
             st.write(reply)
         run("INSERT INTO ai_messages (id, username, role, content, created_at) VALUES (?, ?, 'user', ?, ?)",
-            (str(uuid.uuid4()), current_user, text, datetime.now().isoformat()))
+            (str(uuid.uuid4()), current_user, text, utc_now().isoformat()))
         run("INSERT INTO ai_messages (id, username, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)",
-            (str(uuid.uuid4()), current_user, reply, datetime.now().isoformat()))
+            (str(uuid.uuid4()), current_user, reply, utc_now().isoformat()))
 
     if st.session_state.get("yuaan_status"):
         st.warning("Real AI is off for the last message. " + st.session_state.yuaan_status)
