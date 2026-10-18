@@ -99,6 +99,8 @@ def make_theme(bg, primary, secondary, ink=None, accents=None):
             "yuaan": (d(accents[2]), d(accents[3], 0.24)),
             "foryou": (d(accents[3]), d(accents[1])),
             "profile": (d(accents[3]), d(accents[2])),
+            "search": (d(accents[2]), d(accents[0])),
+            "alerts": (d(accents[1]), d(accents[3])),
         },
     }
 
@@ -341,7 +343,7 @@ def cached_run(sql, params=(), fetch="one"):
 @st.cache_resource(show_spinner="Setting up the database...")
 def init_db():
     tables = [
-        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL, display_name TEXT NOT NULL, avatar_path TEXT, theme TEXT)",
+        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL, display_name TEXT NOT NULL, avatar_path TEXT, theme TEXT, bio TEXT, notif_seen_at TEXT)",
         "CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL)",
         'CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY, post_id TEXT NOT NULL, file_path TEXT NOT NULL, file_type TEXT NOT NULL, "position" INTEGER NOT NULL)',
         # comments are used for both posts and reels (post_id holds either id)
@@ -358,24 +360,34 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS group_chats (id TEXT PRIMARY KEY, name TEXT NOT NULL, creator TEXT NOT NULL, created_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS group_members (group_id TEXT NOT NULL, username TEXT NOT NULL, PRIMARY KEY (group_id, username))",
         "CREATE TABLE IF NOT EXISTS group_messages (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL)",
+        # likes on feed posts
+        "CREATE TABLE IF NOT EXISTS post_likes (post_id TEXT NOT NULL, username TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (post_id, username))",
         # when each member last opened each group (drives read / unread and "seen by")
         "CREATE TABLE IF NOT EXISTS group_reads (group_id TEXT NOT NULL, username TEXT NOT NULL, last_read_at TEXT NOT NULL, PRIMARY KEY (group_id, username))",
     ]
     for sql in tables:
         run(sql)
+    # columns added later (older databases don't have them yet)
+    for sql in ("ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS notif_seen_at TEXT"):
+        try:
+            run(sql)
+        except Exception:
+            pass
     # keeps pages quick
     for sql in ("CREATE INDEX IF NOT EXISTS idx_posts_created ON posts (created_at)",
                 "CREATE INDEX IF NOT EXISTS idx_media_post ON media (post_id)",
                 "CREATE INDEX IF NOT EXISTS idx_comments_post ON comments (post_id)",
                 "CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages (sender, receiver)",
                 "CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages (receiver, is_read)",
+                "CREATE INDEX IF NOT EXISTS idx_post_likes_post ON post_likes (post_id)",
                 "CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members (username)",
                 "CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages (group_id, created_at)"):
         run(sql)
     # Supabase also exposes tables through a public web API. Turning row security on (with no rules)
     # shuts that door; this app talks to the database directly, so it is not affected.
     for name in ("users", "posts", "media", "comments", "sessions", "friendships", "messages", "reels", "reel_likes", "follows", "ai_messages",
-                 "group_chats", "group_members", "group_messages", "group_reads"):
+                 "group_chats", "group_members", "group_messages", "group_reads", "post_likes"):
         run(f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY")
     return True
 
@@ -457,6 +469,62 @@ def check_password(password, stored):
 def get_display_name(username):
     row = cached_run("SELECT display_name FROM users WHERE username = ?", (username,), "one")
     return row[0] if row else username
+
+
+def get_bio(username):
+    row = run("SELECT bio FROM users WHERE username = ?", (username,), "one")
+    return (row[0] or "") if row else ""
+
+
+def cb_save_bio():
+    me = st.session_state.username
+    run("UPDATE users SET bio = ? WHERE username = ?", ((st.session_state.get("bio_text") or "").strip()[:150], me))
+    st.toast("Bio saved", icon="✍️")
+
+
+EPOCH = "1970-01-01T00:00:00"
+
+
+def get_seen_at(me):
+    row = run("SELECT notif_seen_at FROM users WHERE username = ?", (me,), "one")
+    return (row[0] if row and row[0] else EPOCH)
+
+
+def alert_count(me):
+    seen = get_seen_at(me)
+    row = run('''SELECT
+        (SELECT COUNT(*) FROM follows WHERE followee = ? AND created_at > ?)
+      + (SELECT COUNT(*) FROM friendships WHERE addressee = ? AND status = 'pending' AND created_at > ?)
+      + (SELECT COUNT(*) FROM post_likes l JOIN posts p ON p.id = l.post_id
+         WHERE p.author_username = ? AND l.username <> ? AND l.created_at > ?)
+      + (SELECT COUNT(*) FROM comments c JOIN posts p ON p.id = c.post_id
+         WHERE p.author_username = ? AND c.author_username <> ? AND c.created_at > ?)''',
+        (me, seen, me, seen, me, me, seen, me, me, seen), "one")
+    return row[0] if row else 0
+
+
+def alert_items(me, limit=40):
+    """[(created_at, who, text)] newest first: followers, friend requests, likes and comments on my posts."""
+    items = []
+    for who, at in run("SELECT follower, created_at FROM follows WHERE followee = ? ORDER BY created_at DESC LIMIT 30", (me,), "all"):
+        items.append((at, who, "started following you"))
+    for who, at in run("SELECT requester, created_at FROM friendships WHERE addressee = ? AND status = 'pending' "
+                       "ORDER BY created_at DESC LIMIT 30", (me,), "all"):
+        items.append((at, who, "sent you a friend request"))
+    for who, at, note in run('''SELECT l.username, l.created_at, p.note FROM post_likes l JOIN posts p ON p.id = l.post_id
+                             WHERE p.author_username = ? AND l.username <> ? ORDER BY l.created_at DESC LIMIT 30''', (me, me), "all"):
+        items.append((at, who, f"liked your post “{note[:40]}”"))
+    for who, at, note in run('''SELECT c.author_username, c.created_at, p.note FROM comments c JOIN posts p ON p.id = c.post_id
+                             WHERE p.author_username = ? AND c.author_username <> ? ORDER BY c.created_at DESC LIMIT 30''', (me, me), "all"):
+        items.append((at, who, f"commented on your post “{note[:40]}”"))
+    items.sort(key=lambda x: x[0], reverse=True)
+    return items[:limit]
+
+
+def cb_open_alerts(me):
+    st.session_state.alerts_prev_seen = get_seen_at(me)
+    run("UPDATE users SET notif_seen_at = ? WHERE username = ?", (utc_now().isoformat(), me))
+    st.session_state.page = "alerts"
 
 
 def get_theme_value(username):
@@ -721,13 +789,35 @@ def cb_view_profile(username):
     st.session_state.profile_user = username
 
 
+def load_likes(post_ids, me):
+    """Like counts and 'did I like it' for many posts in one query; post_actions reads them from here."""
+    info = {pid: (0, False) for pid in post_ids}
+    if post_ids:
+        marks = ",".join("?" * len(post_ids))
+        for pid, n, mine in run(f"SELECT post_id, COUNT(*), MAX(CASE WHEN username = ? THEN 1 ELSE 0 END) "
+                                f"FROM post_likes WHERE post_id IN ({marks}) GROUP BY post_id", (me, *post_ids), "all"):
+            info[pid] = (n, bool(mine))
+    st.session_state["_likes"] = info
+
+
+def cb_toggle_post_like(post_id, me):
+    if run("SELECT 1 FROM post_likes WHERE post_id = ? AND username = ?", (post_id, me), "one"):
+        run("DELETE FROM post_likes WHERE post_id = ? AND username = ?", (post_id, me))
+    else:
+        run("INSERT OR IGNORE INTO post_likes (post_id, username, created_at) VALUES (?, ?, ?)",
+            (post_id, me, utc_now().isoformat()))
+
+
 def post_actions(post_id, author, me, prefix, show_profile=True):
-    """Profile button, and a delete button on your own posts."""
+    """Like button, Profile button, and a delete button on your own posts."""
+    count, mine = st.session_state.get("_likes", {}).get(post_id, (0, False))
     c1, c2, c3 = st.columns([2, 2, 2])
+    c1.button(f"{'❤️' if mine else '🤍'} {count}", key=f"{prefix}_like_{post_id}", on_click=cb_toggle_post_like,
+              args=(post_id, me), use_container_width=True)
     if show_profile:
-        c1.button("👤 Profile", key=f"{prefix}_prof_{post_id}", on_click=cb_view_profile, args=(author,), use_container_width=True)
+        c2.button("👤 Profile", key=f"{prefix}_prof_{post_id}", on_click=cb_view_profile, args=(author,), use_container_width=True)
     if author == me:
-        c2.button("🗑️ Delete", key=f"{prefix}_del_{post_id}", on_click=cb_delete_post, args=(post_id, me), use_container_width=True)
+        c3.button("🗑️ Delete", key=f"{prefix}_del_{post_id}", on_click=cb_delete_post, args=(post_id, me), use_container_width=True)
 
 
 def cb_sign_out():
@@ -738,7 +828,7 @@ def cb_sign_out():
     st.session_state.username = ""
     st.session_state.token = ""
     st.session_state.page = "feed"
-    for key in ("chat_with", "theme_choice", "theme_bg", "theme_main", "theme_second", "reel_idx", "profile_user"):
+    for key in ("chat_with", "bio_text", "theme_choice", "theme_bg", "theme_main", "theme_second", "reel_idx", "profile_user"):
         st.session_state.pop(key, None)
 
 
@@ -1392,9 +1482,13 @@ if "avatar_nonce" not in st.session_state:
 pending_count = len(get_incoming_requests(current_user))
 unread_count = count_unread(current_user)
 
+alert_n = alert_count(current_user)
+
 PAGE_LABELS = {
     "feed": "🏠 Feed",
     "foryou": "✨ For You",
+    "search": "🔍 Search",
+    "alerts": "🔔 Alerts" + (f" ({alert_n} new)" if alert_n else ""),
     "reels": "🎬 Reels",
     "friends": "👥 Friends" + (f" ({pending_count} new)" if pending_count else ""),
     "chats": "💬 Chats" + (f" ({unread_count} new)" if unread_count else ""),
@@ -1407,7 +1501,8 @@ with st.sidebar:
     for page_key, page_label in PAGE_LABELS.items():
         st.button(page_label, key=f"nav_{page_key}", use_container_width=True,
                   type="primary" if st.session_state.page == page_key else "secondary",
-                  on_click=cb_go_page, args=(page_key,))
+                  on_click=cb_open_alerts if page_key == "alerts" else cb_go_page,
+                  args=(current_user,) if page_key == "alerts" else (page_key,))
 
     st.divider()
     with st.expander("⚙️ Profile Settings"):
@@ -1426,6 +1521,11 @@ with st.sidebar:
             if new_display_name:
                 run("UPDATE users SET display_name = ? WHERE username = ?", (new_display_name, current_user))
                 st.rerun()
+
+        if "bio_text" not in st.session_state:
+            st.session_state.bio_text = get_bio(current_user)
+        st.text_area("Bio (up to 150 characters)", key="bio_text", max_chars=150, height=80)
+        st.button("Save bio", key="save_bio_btn", on_click=cb_save_bio)
 
         st.button("👤 View my profile", key="view_my_profile", on_click=cb_view_profile, args=(current_user,))
 
@@ -1450,7 +1550,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v31")
+    st.caption("Design v32")
 
 # ------------------------------------------
 # Shared by the Feed and For You pages
@@ -1458,6 +1558,7 @@ with st.sidebar:
 def fetch_post_extras(post_ids):
     """Photos and comments for many posts at once (two queries instead of two per post)."""
     media_by_post, comments_by_post = {}, {}
+    load_likes(list(post_ids), current_user)
     if post_ids:
         marks = ",".join("?" * len(post_ids))
         ids = tuple(post_ids)
@@ -1527,18 +1628,20 @@ def recommend_posts(me, circle, limit=8):
     ids = tuple(r[0] for r in rows)
     counts = dict(run(f"SELECT post_id, COUNT(*) FROM comments WHERE post_id IN ({marks}) GROUP BY post_id", ids, "all"))
     with_media = {r[0] for r in run(f"SELECT DISTINCT post_id FROM media WHERE post_id IN ({marks})", ids, "all")}
+    likes = dict(run(f"SELECT post_id, COUNT(*) FROM post_likes WHERE post_id IN ({marks}) GROUP BY post_id", ids, "all"))
     connected = people_connected_to(circle, me)
     now = utc_now()
     scored = []
     for row in rows:
         post_id, _, created_at, author = row
         age_hours = max((now - datetime.fromisoformat(created_at)).total_seconds() / 3600, 0)
+        liked = likes.get(post_id, 0)
         talked = counts.get(post_id, 0)
-        score = talked * 2 + (1 if post_id in with_media else 0) + (4 if author in connected else 0) + 6 / (1 + age_hours / 24)
+        score = talked * 2 + liked * 1.5 + (1 if post_id in with_media else 0) + (4 if author in connected else 0) + 6 / (1 + age_hours / 24)
         if author in connected:
             reason = "From someone connected to people you know"
-        elif talked:
-            reason = "People are talking about this"
+        elif liked or talked:
+            reason = "People are liking and talking about this"
         else:
             reason = "New on Yuaan Post"
         scored.append((score, row, reason))
@@ -1917,6 +2020,9 @@ elif st.session_state.page == "profile":
     else:
         banner(get_display_name(target), f"@{target}", "profile")
         st.markdown(avatar_html(target, size=96), unsafe_allow_html=True)
+        bio = get_bio(target)
+        if bio:
+            st.markdown(f'<div style="white-space: pre-wrap; margin: 6px 0 10px;">{html.escape(bio)}</div>', unsafe_allow_html=True)
 
         n_posts = run("SELECT COUNT(*) FROM posts WHERE author_username = ?", (target,), "one")[0]
         n_friends = len(get_friends(target))
@@ -1957,6 +2063,7 @@ elif st.session_state.page == "profile":
                               (target,), "all")
             if not their_posts:
                 st.caption("No posts yet.")
+            load_likes([p[0] for p in their_posts], current_user)
             for p_id, p_note, p_created in their_posts:
                 with st.container(border=True):
                     st.caption(f"🕒 {thai_time(p_created, '%d %b %Y, %H:%M')}")
@@ -1977,6 +2084,60 @@ elif st.session_state.page == "profile":
 # ------------------------------------------
 # PAGE: Yuaan (built-in helper)
 # ------------------------------------------
+elif st.session_state.page == "search":
+    banner("Search", "Find people, posts and #hashtags.", "search")
+
+    def cb_pick_tag(tag):
+        st.session_state.search_q = tag
+
+    q = st.text_input("Search", key="search_q", placeholder="a name, @username, word or #hashtag", label_visibility="collapsed").strip()
+    if not q:
+        tags = {}
+        for (note,) in run("SELECT note FROM posts ORDER BY created_at DESC LIMIT 150", fetch="all"):
+            for t in set(re.findall(r"#\w+", (note or "").lower())):
+                tags[t] = tags.get(t, 0) + 1
+        top = sorted(tags.items(), key=lambda kv: kv[1], reverse=True)[:8]
+        if top:
+            st.subheader("🔥 Trending hashtags")
+            cols = st.columns(2)
+            for i, (t, n) in enumerate(top):
+                cols[i % 2].button(f"{t}  ·  {n}", key=f"tag_{t}", on_click=cb_pick_tag, args=(t,), use_container_width=True)
+        else:
+            st.caption("Type a name or word above. Put #hashtags in your posts and they'll show up here as trends.")
+    else:
+        like = f"%{q.lstrip('@')}%"
+        people = run('''SELECT username FROM users WHERE username ILIKE ? OR display_name ILIKE ?
+                       ORDER BY username LIMIT 15''', (like, like), "all")
+        st.subheader(f"People ({len(people)})")
+        if not people:
+            st.caption("No people found.")
+        for (u,) in people:
+            c1, c2 = st.columns([5, 2])
+            c1.markdown(person_html(u), unsafe_allow_html=True)
+            c2.button("👤 Profile", key=f"sr_prof_{u}", on_click=cb_view_profile, args=(u,))
+        posts = run("SELECT id, note, created_at, author_username FROM posts WHERE note ILIKE ? "
+                    "ORDER BY created_at DESC LIMIT 20", (f"%{q}%",), "all")
+        st.subheader(f"Posts ({len(posts)})")
+        if not posts:
+            st.caption("No posts found.")
+        media_by_post, comments_by_post = fetch_post_extras([p[0] for p in posts])
+        for idx, post in enumerate(posts):
+            render_post_card(idx, post, media_by_post.get(post[0], []), comments_by_post.get(post[0], []), "srch")
+
+elif st.session_state.page == "alerts":
+    banner("Alerts", "New followers, friend requests, likes and comments.", "alerts")
+    prev_seen = st.session_state.get("alerts_prev_seen", get_seen_at(current_user))
+    items = alert_items(current_user)
+    if not items:
+        st.info("Nothing yet. When people follow you, like or comment on your posts, it shows up here.")
+    for at, who, text in items:
+        fresh = at > prev_seen
+        with st.container(border=True):
+            c1, c2 = st.columns([6, 2])
+            c1.markdown(person_html(who, size=36, subtitle=html.escape(text) + (" · 🆕" if fresh else "")), unsafe_allow_html=True)
+            c2.button("👤 Profile", key=f"al_{who}_{at}", on_click=cb_view_profile, args=(who,))
+            st.caption(f"🕒 {thai_time(at, '%d %b, %H:%M')}")
+
 elif st.session_state.page == "yuaan":
     banner("Yuaan", "Your built-in helper for captions, ideas and app tips.", "yuaan")
 
