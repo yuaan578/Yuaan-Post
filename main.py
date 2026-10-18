@@ -765,6 +765,12 @@ def count_unread(me):
 CALL_TAG = "[[CALL]]"
 
 
+def cb_unsend(table, msg_id, me):
+    """Removes one of my own messages (or call invites) completely: no 'deleted' note is left behind."""
+    if table in ("messages", "group_messages"):
+        run(f"DELETE FROM {table} WHERE id = ? AND sender = ?", (msg_id, me))
+
+
 MEET_NEW_URL = "https://meet.google.com/new"
 
 
@@ -795,7 +801,7 @@ def send_message(me, other, text):
 def render_messages(me, other):
     """Re-runs every 3 seconds on its own so new messages appear without a full refresh."""
     run("UPDATE messages SET is_read = 1 WHERE sender = ? AND receiver = ? AND is_read = 0", (other, me))
-    rows = run('''SELECT sender, text, created_at FROM messages
+    rows = run('''SELECT sender, text, created_at, id FROM messages
                   WHERE (sender = ? AND receiver = ?) OR (sender = ? AND receiver = ?)
                   ORDER BY created_at DESC LIMIT 60''', (me, other, other, me), "all")
     rows.reverse()
@@ -803,7 +809,7 @@ def render_messages(me, other):
     with box:
         if not rows:
             st.caption("No messages yet. Say hi! 👋")
-        for sender, text, created_at in rows:
+        for sender, text, created_at, msg_id in rows:
             avatar = get_avatar_path(sender) or "👤"
             role = "user" if sender == me else "assistant"
             with st.chat_message(role, avatar=avatar):
@@ -819,6 +825,8 @@ def render_messages(me, other):
                         st.write("📞 Voice call (ended)")
                 else:
                     st.write(text)
+                if sender == me:
+                    st.button("🗑 Unsend", key=f"unsend_dm_{msg_id}", on_click=cb_unsend, args=("messages", msg_id, me))
 
 
 # --- group chats ---
@@ -922,13 +930,13 @@ def render_group_messages(me, gid):
     mark_group_read(me, gid)   # opening the chat counts as reading everything in it
     members = group_members(gid)
     seen_at = dict(run("SELECT username, last_read_at FROM group_reads WHERE group_id = ?", (gid,), "all"))
-    rows = run('''SELECT sender, text, created_at FROM group_messages WHERE group_id = ?
+    rows = run('''SELECT sender, text, created_at, id FROM group_messages WHERE group_id = ?
                   ORDER BY created_at DESC LIMIT 80''', (gid,), "all")
     rows.reverse()
     with st.container(height=420):
         if not rows:
             st.caption("No messages yet. Say hi to the group! 👋")
-        for sender, text, created_at in rows:
+        for sender, text, created_at, msg_id in rows:
             avatar = get_avatar_path(sender) or "👤"
             readers = [u for u in members if u != sender and seen_at.get(u, "") >= created_at]
             others = len(members) - 1
@@ -950,6 +958,8 @@ def render_group_messages(me, gid):
                         st.caption(label + (f" ({names})" if readers and len(readers) < 6 else ""))
                     else:
                         st.caption(f"👁 Read by {len(readers)} of {others}")
+                if sender == me:
+                    st.button("🗑 Unsend", key=f"unsend_g_{msg_id}", on_click=cb_unsend, args=("group_messages", msg_id, me))
 
 
 # --- reels ---
@@ -1431,7 +1441,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v29")
+    st.caption("Design v30")
 
 # ------------------------------------------
 # Shared by the Feed and For You pages
