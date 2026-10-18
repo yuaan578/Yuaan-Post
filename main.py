@@ -765,12 +765,25 @@ def count_unread(me):
 CALL_TAG = "[[CALL]]"
 
 
-def start_call(me, other):
-    """Makes a private call room and drops the join link into the chat."""
-    room = "YuaanPost-" + uuid.uuid4().hex
-    url = f"https://meet.jit.si/{room}#config.startWithVideoMuted=true&config.disableDeepLinking=true"
-    send_message(me, other, CALL_TAG + url)
-    return url
+MEET_NEW_URL = "https://meet.google.com/new"
+
+
+def new_call_url():
+    """One-tap call: a fresh private Jitsi room. meet.jit.si makes guests wait for a logged-in moderator,
+    so the default is a community server without that rule. Change it with JITSI_SERVER in Streamlit Secrets."""
+    server = (get_secret("JITSI_SERVER") or "meet.ffmuc.net").strip().replace("https://", "").strip("/")
+    return (f"https://{server}/YuaanPost{uuid.uuid4().hex}"
+            "#config.startWithVideoMuted=true&config.prejoinPageEnabled=false&config.disableDeepLinking=true")
+
+
+def clean_meet_link(text):
+    """Accepts a pasted Google Meet link (https://meet.google.com/abc-defg-hij) and returns it, else None."""
+    m = re.search(r"(?:https?://)?(meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3})\b", (text or "").strip().lower())
+    return "https://" + m.group(1) if m else None
+
+
+def start_call(me, other, link):
+    send_message(me, other, CALL_TAG + link)
 
 
 def send_message(me, other, text):
@@ -824,10 +837,28 @@ def send_group_message(me, gid, text):
             (str(uuid.uuid4()), gid, me, text, datetime.now().isoformat()))
 
 
-def start_group_call(me, gid):
-    room = "YuaanPost-" + uuid.uuid4().hex
-    url = f"https://meet.jit.si/{room}#config.startWithVideoMuted=true&config.disableDeepLinking=true"
-    send_group_message(me, gid, CALL_TAG + url)
+def start_group_call(me, gid, link):
+    send_group_message(me, gid, CALL_TAG + link)
+
+
+def call_ui(key, send):
+    """Instant call, or two steps: open Google Meet to make a meeting, then paste its link so friends get a Join button."""
+    if st.button("⚡ Instant call (one tap, nobody needs an account)", key=f"{key}_instant", use_container_width=True):
+        send(new_call_url())
+        st.toast("Calling... tap 'Join call' in the chat.", icon="📞")
+        st.rerun()
+    st.caption("Or use Google Meet:")
+    st.link_button("1️⃣ Open Google Meet (makes a new meeting)", MEET_NEW_URL, use_container_width=True)
+    link_in = st.text_input("2️⃣ Paste the meeting link here", key=f"{key}_link", placeholder="https://meet.google.com/abc-defg-hij")
+    if st.button("📞 Send call to chat", key=f"{key}_send"):
+        link = clean_meet_link(link_in)
+        if link:
+            send(link)
+            st.session_state[f"{key}_link"] = ""
+            st.toast("Call sent. Now tap 'Join call' in the chat.", icon="📞")
+            st.rerun()
+        else:
+            st.warning("That doesn't look like a Google Meet link. It should look like meet.google.com/abc-defg-hij")
 
 
 def cb_create_group(me):
@@ -1400,7 +1431,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v26")
+    st.caption("Design v29")
 
 # ------------------------------------------
 # Shared by the Feed and For You pages
@@ -1817,15 +1848,9 @@ elif st.session_state.page == "chats":
             gid = st.selectbox("Group", ids, format_func=group_label, key="chat_group")
             members = group_members(gid)
             st.caption("Members: " + ", ".join(get_display_name(u) for u in members))
-            b1, b2 = st.columns(2)
-            with b1:
-                if st.button("📞 Group call", key="start_group_call_btn", use_container_width=True):
-                    start_group_call(current_user, gid)
-                    st.toast("Calling the group... tap 'Join call' in the chat.", icon="📞")
-                    st.rerun()
-            with b2:
-                st.button("🚪 Leave group", key=f"leave_{gid}", on_click=cb_leave_group,
-                          args=(current_user, gid), use_container_width=True)
+            st.button("🚪 Leave group", key=f"leave_{gid}", on_click=cb_leave_group, args=(current_user, gid))
+            with st.expander("📞 Start a Google Meet call"):
+                call_ui(f"gcall_{gid}", lambda link: start_group_call(current_user, gid, link))
             addable = [u for u in friends if u not in members]
             if addable:
                 with st.expander("Add more friends"):
@@ -1852,10 +1877,8 @@ elif st.session_state.page == "chats":
         other = st.selectbox("Chat with", friends, format_func=friend_label, key="chat_with")
 
         st.markdown(person_html(other, size=36), unsafe_allow_html=True)
-        if st.button(f"📞 Voice call {get_display_name(other)}", key="start_call_btn"):
-            start_call(current_user, other)
-            st.toast("Calling... tap 'Join call' in the chat below.", icon="📞")
-            st.rerun()
+        with st.expander(f"📞 Start a Google Meet call with {get_display_name(other)}"):
+            call_ui("dmcall", lambda link: start_call(current_user, other, link))
         render_messages(current_user, other)
 
         prompt = st.chat_input(f"Message {get_display_name(other)}...")
