@@ -498,27 +498,47 @@ def alert_count(me):
       + (SELECT COUNT(*) FROM post_likes l JOIN posts p ON p.id = l.post_id
          WHERE p.author_username = ? AND l.username <> ? AND l.created_at > ?)
       + (SELECT COUNT(*) FROM comments c JOIN posts p ON p.id = c.post_id
-         WHERE p.author_username = ? AND c.author_username <> ? AND c.created_at > ?)''',
-        (me, seen, me, seen, me, me, seen, me, me, seen), "one")
+         WHERE p.author_username = ? AND c.author_username <> ? AND c.created_at > ?)
+      + (SELECT COUNT(*) FROM messages WHERE receiver = ? AND is_read = 0 AND created_at > ? AND text NOT LIKE ?)
+      + (SELECT COUNT(*) FROM group_messages m JOIN group_members gm ON gm.group_id = m.group_id AND gm.username = ?
+         WHERE m.sender <> ? AND m.created_at > ? AND m.text NOT LIKE ?)''',
+        (me, seen, me, seen, me, me, seen, me, me, seen, me, seen, CALL_TAG + "%", me, me, seen, CALL_TAG + "%"), "one")
     return row[0] if row else 0
 
 
 def alert_items(me, limit=40):
-    """[(created_at, who, text)] newest first: followers, friend requests, likes and comments on my posts."""
+    """[(created_at, who, text, kind, ref)] newest first: followers, friend requests, likes, comments and unread messages."""
     items = []
     for who, at in run("SELECT follower, created_at FROM follows WHERE followee = ? ORDER BY created_at DESC LIMIT 30", (me,), "all"):
-        items.append((at, who, "started following you"))
+        items.append((at, who, "started following you", "person", None))
     for who, at in run("SELECT requester, created_at FROM friendships WHERE addressee = ? AND status = 'pending' "
                        "ORDER BY created_at DESC LIMIT 30", (me,), "all"):
-        items.append((at, who, "sent you a friend request"))
+        items.append((at, who, "sent you a friend request", "request", None))
     for who, at, note in run('''SELECT l.username, l.created_at, p.note FROM post_likes l JOIN posts p ON p.id = l.post_id
                              WHERE p.author_username = ? AND l.username <> ? ORDER BY l.created_at DESC LIMIT 30''', (me, me), "all"):
-        items.append((at, who, f"liked your post “{note[:40]}”"))
+        items.append((at, who, f"liked your post “{note[:40]}”", "person", None))
     for who, at, note in run('''SELECT c.author_username, c.created_at, p.note FROM comments c JOIN posts p ON p.id = c.post_id
                              WHERE p.author_username = ? AND c.author_username <> ? ORDER BY c.created_at DESC LIMIT 30''', (me, me), "all"):
-        items.append((at, who, f"commented on your post “{note[:40]}”"))
+        items.append((at, who, f"commented on your post “{note[:40]}”", "person", None))
+    for who, n, at in run('''SELECT sender, COUNT(*), MAX(created_at) FROM messages
+                          WHERE receiver = ? AND is_read = 0 AND text NOT LIKE ? GROUP BY sender''', (me, CALL_TAG + "%"), "all"):
+        items.append((at, who, f"sent you {n} unread message{'s' if n != 1 else ''}", "dm", who))
+    for gid, name, n, at in run('''SELECT g.id, g.name, COUNT(*), MAX(m.created_at)
+                                FROM group_messages m
+                                JOIN group_members gm ON gm.group_id = m.group_id AND gm.username = ?
+                                JOIN group_chats g ON g.id = m.group_id
+                                LEFT JOIN group_reads r ON r.group_id = m.group_id AND r.username = ?
+                                WHERE m.sender <> ? AND m.text NOT LIKE ? AND (r.last_read_at IS NULL OR m.created_at > r.last_read_at)
+                                GROUP BY g.id, g.name''', (me, me, me, CALL_TAG + "%"), "all"):
+        items.append((at, name, f"{n} unread message{'s' if n != 1 else ''} in this group", "group", gid))
     items.sort(key=lambda x: x[0], reverse=True)
     return items[:limit]
+
+
+def cb_open_group(gid):
+    st.session_state.page = "chats"
+    st.session_state.chat_mode = "👥 Groups"
+    st.session_state.chat_group = gid
 
 
 def cb_open_alerts(me):
@@ -789,6 +809,27 @@ def cb_view_profile(username):
     st.session_state.profile_user = username
 
 
+def share_targets(me):
+    """Friends and groups a post can be sent to: [(code, label)]; codes are 'u:username' or 'g:group_id'."""
+    out = [(f"u:{u}", f"{get_display_name(u)} (@{u})") for u in get_friends(me)]
+    out += [(f"g:{gid}", f"👥 {name}") for gid, name in my_groups(me)]
+    return out
+
+
+def cb_share_post(post_id, prefix, me):
+    code = st.session_state.get(f"{prefix}_shto_{post_id}")
+    targets = dict(share_targets(me))   # checked again here, so only friends and my own groups work
+    if code not in targets:
+        st.toast("Pick someone to send it to.", icon="⚠️")
+        return
+    kind, ref = code.split(":", 1)
+    if kind == "u":
+        send_message(me, ref, POST_TAG + post_id)
+    else:
+        send_group_message(me, ref, POST_TAG + post_id)
+    st.toast(f"Shared with {targets[code].replace('👥 ', '')}", icon="📤")
+
+
 def load_likes(post_ids, me):
     """Like counts and 'did I like it' for many posts in one query; post_actions reads them from here."""
     info = {pid: (0, False) for pid in post_ids}
@@ -798,6 +839,7 @@ def load_likes(post_ids, me):
                                 f"FROM post_likes WHERE post_id IN ({marks}) GROUP BY post_id", (me, *post_ids), "all"):
             info[pid] = (n, bool(mine))
     st.session_state["_likes"] = info
+    st.session_state["_share_targets"] = share_targets(me) if post_ids else []
 
 
 def cb_toggle_post_like(post_id, me):
@@ -818,6 +860,14 @@ def post_actions(post_id, author, me, prefix, show_profile=True):
         c2.button("👤 Profile", key=f"{prefix}_prof_{post_id}", on_click=cb_view_profile, args=(author,), use_container_width=True)
     if author == me:
         c3.button("🗑️ Delete", key=f"{prefix}_del_{post_id}", on_click=cb_delete_post, args=(post_id, me), use_container_width=True)
+    with st.popover("📤 Share", use_container_width=True):
+        targets = st.session_state.get("_share_targets", [])
+        if not targets:
+            st.caption("Add a friend first, then you can share posts with them.")
+        else:
+            st.selectbox("Send to", [t[0] for t in targets], format_func=dict(targets).get,
+                         key=f"{prefix}_shto_{post_id}")
+            st.button("Send", key=f"{prefix}_shsend_{post_id}", on_click=cb_share_post, args=(post_id, prefix, me))
 
 
 def cb_sign_out():
@@ -862,6 +912,26 @@ def count_unread(me):
 
 
 CALL_TAG = "[[CALL]]"
+POST_TAG = "[[POST]]"   # a shared post inside a chat message
+
+
+def render_shared_post(post_id, key):
+    """Small preview card for a post somebody shared in a chat."""
+    row = run("SELECT note, author_username FROM posts WHERE id = ?", (post_id,), "one")
+    with st.container(border=True):
+        if not row:
+            st.caption("📤 This post is no longer available.")
+            return
+        note, author = row
+        st.caption(f"📤 Shared post by {get_display_name(author)}")
+        if note:
+            st.write(note if len(note) <= 220 else note[:220] + "…")
+        first = run('SELECT file_path, file_type FROM media WHERE post_id = ? ORDER BY "position" LIMIT 1', (post_id,), "one")
+        if first and (first[1] or "").startswith("image"):
+            st.image(file_url(first[0]), use_container_width=True)
+        elif first:
+            st.caption("🎬 Has a video")
+        st.button("👤 View profile", key=f"sp_{key}", on_click=cb_view_profile, args=(author,))
 
 
 def cb_unsend(table, msg_id, me):
@@ -922,6 +992,8 @@ def render_messages(me, other):
                         st.link_button("📞 Join call", text[len(CALL_TAG):], key=f"join_{sender}_{created_at}")
                     else:
                         st.write("📞 Voice call (ended)")
+                elif text.startswith(POST_TAG):
+                    render_shared_post(text[len(POST_TAG):], f"dm_{msg_id}")
                 else:
                     st.write(text)
                 if sender == me:
@@ -1053,6 +1125,8 @@ def render_group_messages(me, gid):
                         st.link_button("📞 Join call", text[len(CALL_TAG):], key=f"gjoin_{gid}_{sender}_{created_at}")
                     else:
                         st.write("📞 Voice call (ended)")
+                elif text.startswith(POST_TAG):
+                    render_shared_post(text[len(POST_TAG):], f"g_{msg_id}")
                 else:
                     st.write(text)
                 if others > 0:
@@ -1555,7 +1629,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v33")
+    st.caption("Design v34")
 
 # ------------------------------------------
 # Shared by the Feed and For You pages
@@ -2130,17 +2204,28 @@ elif st.session_state.page == "search":
             render_post_card(idx, post, media_by_post.get(post[0], []), comments_by_post.get(post[0], []), "srch")
 
 elif st.session_state.page == "alerts":
-    banner("Alerts", "New followers, friend requests, likes and comments.", "alerts")
+    banner("Alerts", "Friend requests, followers, likes, comments and messages.", "alerts")
     prev_seen = st.session_state.get("alerts_prev_seen", get_seen_at(current_user))
     items = alert_items(current_user)
     if not items:
         st.info("Nothing yet. When people follow you, like or comment on your posts, it shows up here.")
-    for at, who, text in items:
+    for i, (at, who, text, kind, ref) in enumerate(items):
         fresh = at > prev_seen
+        tag = " · 🆕" if fresh else ""
         with st.container(border=True):
             c1, c2 = st.columns([6, 2])
-            c1.markdown(person_html(who, size=36, subtitle=html.escape(text) + (" · 🆕" if fresh else "")), unsafe_allow_html=True)
-            c2.button("👤 Profile", key=f"al_{who}_{at}", on_click=cb_view_profile, args=(who,))
+            if kind == "group":
+                c1.markdown(f"**👥 {html.escape(who)}**<br><span style='opacity:0.7;font-size:13px;'>{html.escape(text)}{tag}</span>",
+                            unsafe_allow_html=True)
+                c2.button("💬 Open", key=f"al_g_{ref}", on_click=cb_open_group, args=(ref,))
+            else:
+                c1.markdown(person_html(who, size=36, subtitle=html.escape(text) + tag), unsafe_allow_html=True)
+                if kind == "dm":
+                    c2.button("💬 Open", key=f"al_dm_{who}", on_click=cb_open_chat, args=(who,))
+                elif kind == "request":
+                    c2.button("👥 Friends", key=f"al_rq_{who}", on_click=cb_go_page, args=("friends",))
+                else:
+                    c2.button("👤 Profile", key=f"al_p_{i}", on_click=cb_view_profile, args=(who,))
             st.caption(f"🕒 {thai_time(at, '%d %b, %H:%M')}")
 
 elif st.session_state.page == "yuaan":
