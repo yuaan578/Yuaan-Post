@@ -362,6 +362,8 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS group_messages (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL)",
         # likes on feed posts
         "CREATE TABLE IF NOT EXISTS post_likes (post_id TEXT NOT NULL, username TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (post_id, username))",
+        # alerts a person has cleared away
+        "CREATE TABLE IF NOT EXISTS alert_dismissed (username TEXT NOT NULL, alert_key TEXT NOT NULL, PRIMARY KEY (username, alert_key))",
         # when each member last opened each group (drives read / unread and "seen by")
         "CREATE TABLE IF NOT EXISTS group_reads (group_id TEXT NOT NULL, username TEXT NOT NULL, last_read_at TEXT NOT NULL, PRIMARY KEY (group_id, username))",
     ]
@@ -387,7 +389,7 @@ def init_db():
     # Supabase also exposes tables through a public web API. Turning row security on (with no rules)
     # shuts that door; this app talks to the database directly, so it is not affected.
     for name in ("users", "posts", "media", "comments", "sessions", "friendships", "messages", "reels", "reel_likes", "follows", "ai_messages",
-                 "group_chats", "group_members", "group_messages", "group_reads", "post_likes"):
+                 "group_chats", "group_members", "group_messages", "group_reads", "post_likes", "alert_dismissed"):
         run(f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY")
     return True
 
@@ -531,8 +533,26 @@ def alert_items(me, limit=40):
                                 WHERE m.sender <> ? AND m.text NOT LIKE ? AND (r.last_read_at IS NULL OR m.created_at > r.last_read_at)
                                 GROUP BY g.id, g.name''', (me, me, me, CALL_TAG + "%"), "all"):
         items.append((at, name, f"{n} unread message{'s' if n != 1 else ''} in this group", "group", gid))
+    gone = {r[0] for r in run("SELECT alert_key FROM alert_dismissed WHERE username = ?", (me,), "all")}
+    items = [it for it in items if alert_key(it) not in gone]
     items.sort(key=lambda x: x[0], reverse=True)
     return items[:limit]
+
+
+def alert_key(item):
+    """A short fingerprint of one alert. A new message changes it, so a dismissed chat alert returns when there is news."""
+    at, who, text, kind, ref = item
+    return hashlib.md5(f"{kind}|{who}|{at}|{text}".encode()).hexdigest()[:16]
+
+
+def cb_dismiss_alert(me, key):
+    run("INSERT OR IGNORE INTO alert_dismissed (username, alert_key) VALUES (?, ?)", (me, key))
+
+
+def cb_dismiss_all_alerts(me):
+    for item in alert_items(me, limit=200):
+        run("INSERT OR IGNORE INTO alert_dismissed (username, alert_key) VALUES (?, ?)", (me, alert_key(item)))
+    st.toast("Alerts cleared", icon="🧹")
 
 
 def cb_open_group(gid):
@@ -1629,7 +1649,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v34")
+    st.caption("Design v35")
 
 # ------------------------------------------
 # Shared by the Feed and For You pages
@@ -2209,7 +2229,10 @@ elif st.session_state.page == "alerts":
     items = alert_items(current_user)
     if not items:
         st.info("Nothing yet. When people follow you, like or comment on your posts, it shows up here.")
+    if items:
+        st.button("🧹 Clear all", key="al_clear_all", on_click=cb_dismiss_all_alerts, args=(current_user,))
     for i, (at, who, text, kind, ref) in enumerate(items):
+        akey = alert_key((at, who, text, kind, ref))
         fresh = at > prev_seen
         tag = " · 🆕" if fresh else ""
         with st.container(border=True):
@@ -2226,6 +2249,7 @@ elif st.session_state.page == "alerts":
                     c2.button("👥 Friends", key=f"al_rq_{who}", on_click=cb_go_page, args=("friends",))
                 else:
                     c2.button("👤 Profile", key=f"al_p_{i}", on_click=cb_view_profile, args=(who,))
+            c2.button("✖ Dismiss", key=f"al_x_{akey}", on_click=cb_dismiss_alert, args=(current_user, akey))
             st.caption(f"🕒 {thai_time(at, '%d %b, %H:%M')}")
 
 elif st.session_state.page == "yuaan":
