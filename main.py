@@ -1,5 +1,6 @@
 import streamlit as st
 import uuid
+import json
 import os
 import re
 import html
@@ -15,6 +16,7 @@ import psycopg2.pool
 from psycopg2.pool import ThreadedConnectionPool
 from datetime import datetime, timedelta, timezone
 from PIL import Image, ImageOps
+import streamlit.components.v1 as components
 
 def utc_now():
     """Times are stored in UTC (the same on any server) and shown in Thai time."""
@@ -344,7 +346,7 @@ def cached_run(sql, params=(), fetch="one"):
 def init_db():
     tables = [
         "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL, display_name TEXT NOT NULL, avatar_path TEXT, theme TEXT, bio TEXT, notif_seen_at TEXT)",
-        "CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL, song TEXT)",
         'CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY, post_id TEXT NOT NULL, file_path TEXT NOT NULL, file_type TEXT NOT NULL, "position" INTEGER NOT NULL)',
         # comments are used for both posts and reels (post_id holds either id)
         "CREATE TABLE IF NOT EXISTS comments (id TEXT PRIMARY KEY, post_id TEXT NOT NULL, author_username TEXT NOT NULL, comment_text TEXT NOT NULL, created_at TEXT NOT NULL)",
@@ -371,7 +373,8 @@ def init_db():
         run(sql)
     # columns added later (older databases don't have them yet)
     for sql in ("ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT",
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS notif_seen_at TEXT"):
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS notif_seen_at TEXT",
+                "ALTER TABLE posts ADD COLUMN IF NOT EXISTS song TEXT"):
         try:
             run(sql)
         except Exception:
@@ -829,6 +832,108 @@ def cb_view_profile(username):
     st.session_state.profile_user = username
 
 
+# --- songs on posts ---
+SPOTIFY_RE = re.compile(r"open\.spotify\.com/(?:intl-[a-z]+/)?(track|album|playlist|episode)/([A-Za-z0-9]{10,30})")
+YOUTUBE_RE = re.compile(r"(?:youtube\.com/watch\?(?:[^ ]*&)?v=|youtu\.be/|youtube\.com/shorts/)([A-Za-z0-9_-]{11})")
+SAFE_HOSTS = (".apple.com", ".mzstatic.com")
+
+
+def song_from_link(text):
+    """A Spotify or YouTube link -> a song dict, or None."""
+    text = (text or "").strip()
+    m = SPOTIFY_RE.search(text)
+    if m:
+        return {"t": "spotify", "k": m.group(1), "id": m.group(2)}
+    m = YOUTUBE_RE.search(text)
+    if m:
+        return {"t": "youtube", "id": m.group(1)}
+    return None
+
+
+def search_songs(term):
+    """Free Apple/iTunes song search (no key needed). Returns up to 6 songs with a 30-second preview."""
+    try:
+        r = requests.get("https://itunes.apple.com/search", timeout=8,
+                         params={"term": term, "media": "music", "entity": "song", "limit": 6})
+        out = []
+        for x in r.json().get("results", []):
+            if x.get("previewUrl") and x.get("trackName"):
+                out.append({"t": "preview", "title": x["trackName"][:80], "artist": (x.get("artistName") or "")[:80],
+                            "art": x.get("artworkUrl100", ""), "url": x["previewUrl"]})
+        return out
+    except Exception:
+        return None
+
+
+def _safe_url(u):
+    m = re.match(r"https://([^/]+)/", u or "")
+    return bool(m) and any(m.group(1).endswith(h) for h in SAFE_HOSTS)
+
+
+def parse_song(raw):
+    """Reads a stored song and checks it, so nothing odd is ever shown. Returns a dict or None."""
+    try:
+        sg = json.loads(raw) if raw else None
+    except Exception:
+        return None
+    if not isinstance(sg, dict):
+        return None
+    t = sg.get("t")
+    if t == "spotify" and sg.get("k") in ("track", "album", "playlist", "episode") and re.fullmatch(r"[A-Za-z0-9]{10,30}", str(sg.get("id", ""))):
+        return sg
+    if t == "youtube" and re.fullmatch(r"[A-Za-z0-9_-]{11}", str(sg.get("id", ""))):
+        return sg
+    if t == "preview" and _safe_url(sg.get("url")) and str(sg.get("title", "")):
+        if sg.get("art") and not _safe_url(sg["art"]):
+            sg["art"] = ""
+        return sg
+    return None
+
+
+def render_song(raw):
+    sg = parse_song(raw)
+    if not sg:
+        return
+    if sg["t"] == "spotify":
+        components.iframe(f"https://open.spotify.com/embed/{sg['k']}/{sg['id']}",
+                          height=152 if sg["k"] in ("track", "episode") else 352)
+    elif sg["t"] == "youtube":
+        st.video(f"https://www.youtube.com/watch?v={sg['id']}")
+    else:
+        c1, c2 = st.columns([1, 5])
+        if sg.get("art"):
+            c1.image(sg["art"], width=56)
+        c2.markdown(f"🎵 **{html.escape(sg['title'])}**  \n{html.escape(sg.get('artist', ''))}", unsafe_allow_html=True)
+        st.audio(sg["url"])
+
+
+def cb_song_search():
+    term = (st.session_state.get("song_q") or "").strip()
+    if term:
+        st.session_state.song_results = search_songs(term) or []
+        st.session_state.song_searched = True
+
+
+def cb_song_pick(i):
+    results = st.session_state.get("song_results", [])
+    if 0 <= i < len(results):
+        st.session_state.post_song = json.dumps(results[i])
+        st.session_state.song_results = []
+
+
+def cb_song_link():
+    sg = song_from_link(st.session_state.get("song_link"))
+    if sg:
+        st.session_state.post_song = json.dumps(sg)
+        st.session_state.song_link = ""
+    else:
+        st.toast("That isn't a Spotify or YouTube link.", icon="⚠️")
+
+
+def cb_song_remove():
+    st.session_state.pop("post_song", None)
+
+
 def share_targets(me):
     """Friends and groups a post can be sent to: [(code, label)]; codes are 'u:username' or 'g:group_id'."""
     out = [(f"u:{u}", f"{get_display_name(u)} (@{u})") for u in get_friends(me)]
@@ -859,6 +964,11 @@ def load_likes(post_ids, me):
                                 f"FROM post_likes WHERE post_id IN ({marks}) GROUP BY post_id", (me, *post_ids), "all"):
             info[pid] = (n, bool(mine))
     st.session_state["_likes"] = info
+    songs = {}
+    if post_ids:
+        marks2 = ",".join("?" * len(post_ids))
+        songs = {pid: song for pid, song in run(f"SELECT id, song FROM posts WHERE id IN ({marks2})", tuple(post_ids), "all") if song}
+    st.session_state["_songs"] = songs
     st.session_state["_share_targets"] = share_targets(me) if post_ids else []
 
 
@@ -1649,7 +1759,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v35")
+    st.caption("Design v36")
 
 # ------------------------------------------
 # Shared by the Feed and For You pages
@@ -1686,6 +1796,7 @@ def render_post_card(idx, post, media_rows, comments, prefix, reason=None):
         st.markdown(f'<div style="white-space: pre-wrap; margin: 10px 0;">{html.escape(note)}</div>', unsafe_allow_html=True)
 
         show_media(media_rows, can_edit=(author_username == current_user), key_prefix=f"{prefix}_{post_id}")
+        render_song(st.session_state.get("_songs", {}).get(post_id))
 
         post_actions(post_id, author_username, current_user, prefix)
 
@@ -1822,6 +1933,26 @@ incoming_call_watcher(current_user)
 if st.session_state.page == "feed":
     banner("Yuaan Post", "See what your friends are up to, or post something new.", "feed")
 
+    chosen = parse_song(st.session_state.get("post_song"))
+    with st.expander("🎵 Add a song to your post" + (" ✅" if chosen else "")):
+        if chosen:
+            render_song(st.session_state.post_song)
+            st.button("✖ Remove song", key="song_remove_btn", on_click=cb_song_remove)
+        st.text_input("Search a song or artist", key="song_q", placeholder="e.g. Blinding Lights")
+        st.button("🔍 Search", key="song_search_btn", on_click=cb_song_search)
+        results = st.session_state.get("song_results", [])
+        if st.session_state.get("song_searched") and not results:
+            st.caption("No songs found (or search isn't reachable right now). You can paste a link below instead.")
+        for i, sg in enumerate(results):
+            c1, c2, c3 = st.columns([1, 4, 2])
+            if sg.get("art"):
+                c1.image(sg["art"], width=48)
+            c2.markdown(f"**{html.escape(sg['title'])}**  \n{html.escape(sg['artist'])}", unsafe_allow_html=True)
+            c3.button("Choose", key=f"song_pick_{i}", on_click=cb_song_pick, args=(i,))
+        st.caption("Search plays a 30-second preview. Or paste a Spotify or YouTube link:")
+        st.text_input("Spotify or YouTube link", key="song_link", placeholder="https://open.spotify.com/track/...")
+        st.button("Use link", key="song_link_btn", on_click=cb_song_link)
+
     with st.form("diary_form", clear_on_submit=True):
         note = st.text_area("Your description...")
         with st.expander("📁 click to select photos or videos"):
@@ -1853,7 +1984,11 @@ if st.session_state.page == "feed":
                         delete_file(key)
                     st.error(problem)
                 else:
-                    run("INSERT INTO posts (id, author_username, note, created_at) VALUES (?, ?, ?, ?)", (post_id, current_user, note, created_at))
+                    song_value = st.session_state.get("post_song") if parse_song(st.session_state.get("post_song")) else None
+                    run("INSERT INTO posts (id, author_username, note, created_at, song) VALUES (?, ?, ?, ?, ?)",
+                        (post_id, current_user, note, created_at, song_value))
+                    for k in ("post_song", "song_results", "song_searched"):
+                        st.session_state.pop(k, None)
                     for position, (key, mime) in enumerate(saved_files):
                         run('INSERT INTO media (id, post_id, file_path, file_type, "position") VALUES (?, ?, ?, ?, ?)',
                             (str(uuid.uuid4()), post_id, key, mime, position))
@@ -2169,6 +2304,7 @@ elif st.session_state.page == "profile":
                     st.markdown(f'<div style="white-space: pre-wrap; margin: 6px 0;">{html.escape(p_note)}</div>', unsafe_allow_html=True)
                     show_media(run("SELECT file_path, file_type FROM media WHERE post_id = ? ORDER BY \"position\"", (p_id,), "all"),
                                can_edit=(target == current_user), key_prefix=f"prof_{p_id}")
+                    render_song(st.session_state.get("_songs", {}).get(p_id))
                     post_actions(p_id, target, current_user, "prof", show_profile=False)
         with tab_reels:
             their_reels = [r for r in get_reels() if r[1] == target][:10]
