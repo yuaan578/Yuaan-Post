@@ -33,6 +33,7 @@ def thai_time(iso, fmt):
 st.set_page_config(page_title="Yuaan Post", page_icon="📸", layout="centered")
 
 BUCKET = "uploads"   # name of the Supabase Storage bucket for photos, reels and profile pictures
+ADMINS = {"yuaan.admin"}   # accounts that see the extra 🛡 Admin page (reports). Add more with ADMIN_USERS in Secrets.
 SESSION_DAYS = 30    # how long "stay logged in" lasts
 MAX_REEL_MB = 50     # biggest reel video allowed (Supabase's free plan allows 50 MB per file)
 MAX_VIDEO_MB = 50    # biggest video allowed in a post
@@ -103,6 +104,7 @@ def make_theme(bg, primary, secondary, ink=None, accents=None):
             "profile": (d(accents[3]), d(accents[2])),
             "search": (d(accents[2]), d(accents[0])),
             "alerts": (d(accents[1]), d(accents[3])),
+            "admin": (d(accents[0]), d(accents[2])),
         },
     }
 
@@ -329,7 +331,20 @@ def run(sql, params=(), fetch=None):
     # names, pictures, friendships and follows are cached for a few seconds, so forget them whenever they change
     if re.match(r"\s*(INSERT|UPDATE|DELETE)\b.*\b(users|friendships|follows)\b", sql, re.I | re.S):
         st.cache_data.clear()
+        st.session_state.pop("_ttl", None)
     return result
+
+
+def ttl_cache(key, seconds, fn):
+    """Remembers fn()'s answer for a few seconds in this person's session, so one click doesn't repeat the same
+    database question many times (every question costs a trip to the database server)."""
+    box = st.session_state.setdefault("_ttl", {})
+    hit = box.get(key)
+    if hit and time.time() - hit[0] < seconds:
+        return hit[1]
+    value = fn()
+    box[key] = (time.time(), value)
+    return value
 
 
 @st.cache_data(ttl=20, show_spinner=False)
@@ -345,7 +360,7 @@ def cached_run(sql, params=(), fetch="one"):
 @st.cache_resource(show_spinner="Setting up the database...")
 def init_db():
     tables = [
-        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL, display_name TEXT NOT NULL, avatar_path TEXT, theme TEXT, bio TEXT, notif_seen_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL, display_name TEXT NOT NULL, avatar_path TEXT, theme TEXT, bio TEXT, notif_seen_at TEXT, last_seen TEXT)",
         "CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL, song TEXT)",
         'CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY, post_id TEXT NOT NULL, file_path TEXT NOT NULL, file_type TEXT NOT NULL, "position" INTEGER NOT NULL)',
         # comments are used for both posts and reels (post_id holds either id)
@@ -364,6 +379,11 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS group_messages (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL)",
         # likes on feed posts
         "CREATE TABLE IF NOT EXISTS post_likes (post_id TEXT NOT NULL, username TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (post_id, username))",
+        # stories (disappear after 24 hours), saved posts, blocking and reports
+        "CREATE TABLE IF NOT EXISTS stories (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, file_path TEXT NOT NULL, file_type TEXT NOT NULL, caption TEXT, created_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS post_saves (post_id TEXT NOT NULL, username TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (post_id, username))",
+        "CREATE TABLE IF NOT EXISTS blocks (blocker TEXT NOT NULL, blocked TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (blocker, blocked))",
+        "CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, reporter TEXT NOT NULL, reported TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL)",
         # alerts a person has cleared away
         "CREATE TABLE IF NOT EXISTS alert_dismissed (username TEXT NOT NULL, alert_key TEXT NOT NULL, PRIMARY KEY (username, alert_key))",
         # when each member last opened each group (drives read / unread and "seen by")
@@ -374,7 +394,8 @@ def init_db():
     # columns added later (older databases don't have them yet)
     for sql in ("ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS notif_seen_at TEXT",
-                "ALTER TABLE posts ADD COLUMN IF NOT EXISTS song TEXT"):
+                "ALTER TABLE posts ADD COLUMN IF NOT EXISTS song TEXT",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TEXT"):
         try:
             run(sql)
         except Exception:
@@ -386,13 +407,14 @@ def init_db():
                 "CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages (sender, receiver)",
                 "CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages (receiver, is_read)",
                 "CREATE INDEX IF NOT EXISTS idx_post_likes_post ON post_likes (post_id)",
+                "CREATE INDEX IF NOT EXISTS idx_stories_created ON stories (created_at)",
                 "CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members (username)",
                 "CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages (group_id, created_at)"):
         run(sql)
     # Supabase also exposes tables through a public web API. Turning row security on (with no rules)
     # shuts that door; this app talks to the database directly, so it is not affected.
     for name in ("users", "posts", "media", "comments", "sessions", "friendships", "messages", "reels", "reel_likes", "follows", "ai_messages",
-                 "group_chats", "group_members", "group_messages", "group_reads", "post_likes", "alert_dismissed"):
+                 "group_chats", "group_members", "group_messages", "group_reads", "post_likes", "alert_dismissed", "stories", "post_saves", "blocks", "reports"):
         run(f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY")
     return True
 
@@ -471,9 +493,34 @@ def check_password(password, stored):
 # ==========================================
 # 4. Helper functions
 # ==========================================
+def people_cache():
+    return ttl_cache("people", 20, dict)   # {username: (display name, picture key)} filled in bulk by prefetch_people
+
+
+def prefetch_people(names):
+    """Looks up many people's names and pictures in ONE query, before a page draws their posts."""
+    cache = people_cache()
+    missing = [n for n in set(names) if n and n not in cache]
+    if missing:
+        marks = ",".join("?" * len(missing))
+        for u, dn, ap in run(f"SELECT username, display_name, avatar_path FROM users WHERE username IN ({marks})", tuple(missing), "all"):
+            cache[u] = (dn, ap)
+
+
 def get_display_name(username):
+    hit = people_cache().get(username)
+    if hit:
+        return hit[0]
     row = cached_run("SELECT display_name FROM users WHERE username = ?", (username,), "one")
     return row[0] if row else username
+
+
+def presence_text(username):
+    row = run("SELECT last_seen FROM users WHERE username = ?", (username,), "one")
+    if not row or not row[0]:
+        return "⚪ Offline"
+    age = (utc_now() - datetime.fromisoformat(row[0])).total_seconds()
+    return "🟢 Online" if age < 100 else f"⚪ Last seen {thai_time(row[0], '%d %b, %H:%M')}"
 
 
 def get_bio(username):
@@ -564,7 +611,122 @@ def cb_open_group(gid):
     st.session_state.chat_group = gid
 
 
+# --- stories ---
+STORY_HOURS = 24
+
+
+def story_cutoff():
+    return (utc_now() - timedelta(hours=STORY_HOURS)).isoformat()
+
+
+def cb_story_open(user):
+    st.session_state.story_user = user
+    st.session_state.story_i = 0
+
+
+def cb_story_close():
+    st.session_state.pop("story_user", None)
+    st.session_state.pop("story_i", None)
+
+
+def cb_story_step(delta, n):
+    st.session_state.story_i = min(max(st.session_state.get("story_i", 0) + delta, 0), n - 1)
+
+
+def cb_story_delete(story_id, me):
+    row = run("SELECT file_path FROM stories WHERE id = ? AND author_username = ?", (story_id, me), "one")
+    if row:
+        run("DELETE FROM stories WHERE id = ? AND author_username = ?", (story_id, me))
+        try:
+            delete_file(row[0])
+        except Exception:
+            pass
+    st.session_state.story_i = 0
+
+
+def add_story_ui(me):
+    with st.expander("➕ Add to your story (disappears after 24 hours)"):
+        with st.form("story_form", clear_on_submit=True):
+            sfile = st.file_uploader("Photo or video", type=["png", "jpg", "jpeg", "mp4", "mov"], key="story_file")
+            scaption = st.text_input("Caption (optional)", max_chars=120)
+            if st.form_submit_button("Share to story"):
+                if not sfile:
+                    st.warning("Choose a photo or video first.")
+                else:
+                    ext = os.path.splitext(sfile.name)[1].lower()
+                    try:
+                        if "video" in (sfile.type or "") or ext in (".mp4", ".mov"):
+                            if sfile.size > MAX_VIDEO_MB * 1024 * 1024:
+                                st.error(f"That video is bigger than {MAX_VIDEO_MB} MB.")
+                                return
+                            mime = "video/quicktime" if ext == ".mov" else (sfile.type or "video/mp4")
+                            key = upload_file(sfile.getvalue(), "stories", ext or ".mp4", mime)
+                        else:
+                            mime = "image/jpeg"
+                            key = upload_file(prepare_photo(sfile.getvalue()), "stories", ".jpg", mime)
+                        run("INSERT INTO stories (id, author_username, file_path, file_type, caption, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                            (str(uuid.uuid4()), me, key, mime, scaption.strip(), utc_now().isoformat()))
+                        # tidy up my own stories that have expired (their files too)
+                        for sid, fp in run("SELECT id, file_path FROM stories WHERE author_username = ? AND created_at <= ?",
+                                           (me, story_cutoff()), "all"):
+                            run("DELETE FROM stories WHERE id = ?", (sid,))
+                            try:
+                                delete_file(fp)
+                            except Exception:
+                                pass
+                        st.rerun()
+                    except (RuntimeError, requests.RequestException):
+                        st.error("The story couldn't be uploaded. Please try again.")
+
+
+def stories_strip(me, circle):
+    people_ids = list(set(circle) | {me})
+    hidden = blocked_set(me)
+    marks = ",".join("?" * len(people_ids))
+    rows = run(f"SELECT author_username, MAX(created_at) FROM stories WHERE created_at > ? AND author_username IN ({marks}) "
+               "GROUP BY author_username ORDER BY MAX(created_at) DESC", (story_cutoff(), *people_ids), "all")
+    rows = [r for r in rows if r[0] not in hidden][:8]
+    if rows:
+        prefetch_people([r[0] for r in rows])
+        st.caption("📖 Stories")
+        cols = st.columns(min(4, len(rows)))
+        for i, (u, _) in enumerate(rows):
+            label = "🟣 Your story" if u == me else f"🟣 {get_display_name(u)}"
+            cols[i % len(cols)].button(label[:18], key=f"story_btn_{u}", on_click=cb_story_open, args=(u,), use_container_width=True)
+
+
+def story_viewer(me):
+    user = st.session_state.get("story_user")
+    if not user:
+        return
+    if user != me and user in blocked_set(me):
+        cb_story_close()
+        return
+    items = run("SELECT id, file_path, file_type, caption, created_at FROM stories WHERE author_username = ? AND created_at > ? "
+                "ORDER BY created_at ASC", (user, story_cutoff()), "all")
+    if not items:
+        cb_story_close()
+        return
+    i = min(max(st.session_state.get("story_i", 0), 0), len(items) - 1)
+    sid, fp, ftype, cap, at = items[i]
+    with st.container(border=True):
+        st.markdown(person_html(user, size=40, subtitle=f"🕒 {thai_time(at, '%d %b, %H:%M')} · {i + 1}/{len(items)}"), unsafe_allow_html=True)
+        if (ftype or "").startswith("video"):
+            st.video(file_url(fp))
+        else:
+            st.image(file_url(fp), use_container_width=True)
+        if cap:
+            st.write(cap)
+        b1, b2, b3, b4 = st.columns(4)
+        b1.button("◀", key="story_prev", on_click=cb_story_step, args=(-1, len(items)), use_container_width=True, disabled=(i == 0))
+        b2.button("▶", key="story_next", on_click=cb_story_step, args=(1, len(items)), use_container_width=True, disabled=(i == len(items) - 1))
+        b3.button("✖ Close", key="story_close", on_click=cb_story_close, use_container_width=True)
+        if user == me:
+            b4.button("🗑", key="story_del", on_click=cb_story_delete, args=(sid, me), use_container_width=True)
+
+
 def cb_open_alerts(me):
+    st.session_state.pop("_ttl", None)
     st.session_state.alerts_prev_seen = get_seen_at(me)
     run("UPDATE users SET notif_seen_at = ? WHERE username = ?", (utc_now().isoformat(), me))
     st.session_state.page = "alerts"
@@ -598,6 +760,9 @@ def delete_session(token):
 # --- profile pictures ---
 def get_avatar_path(username):
     """Web address of someone's profile picture, or None if they haven't set one."""
+    hit = people_cache().get(username)
+    if hit:
+        return file_url(hit[1]) if hit[1] else None
     row = cached_run("SELECT avatar_path FROM users WHERE username = ?", (username,), "one")
     return file_url(row[0]) if row and row[0] else None
 
@@ -719,10 +884,21 @@ def save_avatar(username, uploaded):
 
 
 # --- friends ---
+def my_relations(me):
+    """({other person: (who asked, status)}, {people I follow}) in two queries, remembered for a few seconds."""
+    def load():
+        friends = {}
+        for req, addr, status in run("SELECT requester, addressee, status FROM friendships WHERE requester = ? OR addressee = ?",
+                                     (me, me), "all"):
+            friends[addr if req == me else req] = (req, status)
+        following = {r[0] for r in run("SELECT followee FROM follows WHERE follower = ?", (me,), "all")}
+        return friends, following
+    return ttl_cache(f"rel_{me}", 8, load)
+
+
 def friendship_status(me, other):
     """Returns 'friends', 'sent' (I asked them), 'received' (they asked me) or 'none'."""
-    row = cached_run("SELECT requester, status FROM friendships WHERE (requester = ? AND addressee = ?) OR (requester = ? AND addressee = ?)",
-                     (me, other, other, me), "one")
+    row = my_relations(me)[0].get(other)
     if not row:
         return "none"
     if row[1] == "accepted":
@@ -742,7 +918,52 @@ def get_incoming_requests(me):
     return [r[0] for r in rows]
 
 
+def is_admin(username):
+    extra = {u.strip() for u in (get_secret("ADMIN_USERS") or "").split(",") if u.strip()}
+    return username in ADMINS or username in extra
+
+
+def cb_resolve_report(report_id, me):
+    if is_admin(me):
+        run("DELETE FROM reports WHERE id = ?", (report_id,))
+        st.session_state.pop("_ttl", None)
+        st.toast("Report cleared", icon="✅")
+
+
+def blocked_set(me):
+    """Everyone I blocked plus everyone who blocked me (neither side sees the other)."""
+    return ttl_cache(f"blk_{me}", 15, lambda: {r[0] for r in run(
+        "SELECT blocked FROM blocks WHERE blocker = ? UNION SELECT blocker FROM blocks WHERE blocked = ?", (me, me), "all")})
+
+
+def cb_block_user(me, other):
+    if me == other:
+        return
+    run("INSERT OR IGNORE INTO blocks (blocker, blocked, created_at) VALUES (?, ?, ?)", (me, other, utc_now().isoformat()))
+    run("DELETE FROM friendships WHERE (requester = ? AND addressee = ?) OR (requester = ? AND addressee = ?)", (me, other, other, me))
+    run("DELETE FROM follows WHERE (follower = ? AND followee = ?) OR (follower = ? AND followee = ?)", (me, other, other, me))
+    st.session_state.pop("_ttl", None)
+    st.toast("Blocked. You won't see each other's posts.", icon="🚫")
+
+
+def cb_unblock_user(me, other):
+    run("DELETE FROM blocks WHERE blocker = ? AND blocked = ?", (me, other))
+    st.session_state.pop("_ttl", None)
+    st.toast("Unblocked", icon="✅")
+
+
+def cb_report_user(me, other):
+    reason = (st.session_state.get(f"report_reason_{other}") or "").strip()[:300]
+    run("INSERT INTO reports (id, reporter, reported, reason, created_at) VALUES (?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), me, other, reason, utc_now().isoformat()))
+    st.session_state[f"report_reason_{other}"] = ""
+    st.toast("Thanks, your report was sent.", icon="🚩")
+
+
 def cb_send_request(me, other):
+    if other in blocked_set(me):
+        st.toast("You can't do that with this person.", icon="🚫")
+        return
     if friendship_status(me, other) == "none":
         run("INSERT INTO friendships (id, requester, addressee, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
             (str(uuid.uuid4()), me, other, utc_now().isoformat()))
@@ -775,7 +996,7 @@ def friend_button(container, me, other, key):
 
 # --- followers (one-way: the other person doesn't have to accept) ---
 def is_following(me, other):
-    return cached_run("SELECT 1 FROM follows WHERE follower = ? AND followee = ?", (me, other), "one") is not None
+    return other in my_relations(me)[1]
 
 
 def follower_count(user):
@@ -795,7 +1016,7 @@ def get_following(user):
 
 
 def cb_toggle_follow(me, other):
-    if me == other:
+    if me == other or other in blocked_set(me):
         return
     if run("SELECT 1 FROM follows WHERE follower = ? AND followee = ?", (me, other), "one"):
         run("DELETE FROM follows WHERE follower = ? AND followee = ?", (me, other))
@@ -969,7 +1190,21 @@ def load_likes(post_ids, me):
         marks2 = ",".join("?" * len(post_ids))
         songs = {pid: song for pid, song in run(f"SELECT id, song FROM posts WHERE id IN ({marks2})", tuple(post_ids), "all") if song}
     st.session_state["_songs"] = songs
+    saved = set()
+    if post_ids:
+        marks3 = ",".join("?" * len(post_ids))
+        saved = {r[0] for r in run(f"SELECT post_id FROM post_saves WHERE username = ? AND post_id IN ({marks3})", (me, *post_ids), "all")}
+    st.session_state["_saved"] = saved
     st.session_state["_share_targets"] = share_targets(me) if post_ids else []
+
+
+def cb_toggle_save(post_id, me):
+    if run("SELECT 1 FROM post_saves WHERE post_id = ? AND username = ?", (post_id, me), "one"):
+        run("DELETE FROM post_saves WHERE post_id = ? AND username = ?", (post_id, me))
+        st.toast("Removed from saved", icon="🔖")
+    else:
+        run("INSERT OR IGNORE INTO post_saves (post_id, username, created_at) VALUES (?, ?, ?)", (post_id, me, utc_now().isoformat()))
+        st.toast("Saved. Find it on your profile under 🔖 Saved.", icon="🔖")
 
 
 def cb_toggle_post_like(post_id, me):
@@ -981,16 +1216,15 @@ def cb_toggle_post_like(post_id, me):
 
 
 def post_actions(post_id, author, me, prefix, show_profile=True):
-    """Like button, Profile button, and a delete button on your own posts."""
+    """Like, save and share; then Profile and (on your own posts) Delete."""
     count, mine = st.session_state.get("_likes", {}).get(post_id, (0, False))
-    c1, c2, c3 = st.columns([2, 2, 2])
+    is_saved = post_id in st.session_state.get("_saved", set())
+    c1, c2, c3 = st.columns(3)
     c1.button(f"{'❤️' if mine else '🤍'} {count}", key=f"{prefix}_like_{post_id}", on_click=cb_toggle_post_like,
               args=(post_id, me), use_container_width=True)
-    if show_profile:
-        c2.button("👤 Profile", key=f"{prefix}_prof_{post_id}", on_click=cb_view_profile, args=(author,), use_container_width=True)
-    if author == me:
-        c3.button("🗑️ Delete", key=f"{prefix}_del_{post_id}", on_click=cb_delete_post, args=(post_id, me), use_container_width=True)
-    with st.popover("📤 Share", use_container_width=True):
+    c2.button("🔖 Saved" if is_saved else "🔖 Save", key=f"{prefix}_save_{post_id}", on_click=cb_toggle_save,
+              args=(post_id, me), use_container_width=True, type="primary" if is_saved else "secondary")
+    with c3.popover("📤 Share", use_container_width=True):
         targets = st.session_state.get("_share_targets", [])
         if not targets:
             st.caption("Add a friend first, then you can share posts with them.")
@@ -998,6 +1232,29 @@ def post_actions(post_id, author, me, prefix, show_profile=True):
             st.selectbox("Send to", [t[0] for t in targets], format_func=dict(targets).get,
                          key=f"{prefix}_shto_{post_id}")
             st.button("Send", key=f"{prefix}_shsend_{post_id}", on_click=cb_share_post, args=(post_id, prefix, me))
+    if show_profile or author == me:
+        d1, d2 = st.columns(2)
+        if show_profile:
+            d1.button("👤 Profile", key=f"{prefix}_prof_{post_id}", on_click=cb_view_profile, args=(author,), use_container_width=True)
+        if author == me:
+            d2.button("🗑️ Delete", key=f"{prefix}_del_{post_id}", on_click=cb_delete_post, args=(post_id, me), use_container_width=True)
+
+
+def cb_change_password():
+    me = st.session_state.username
+    cur, new, new2 = (st.session_state.get(k) or "" for k in ("pw_cur", "pw_new", "pw_new2"))
+    row = run("SELECT password FROM users WHERE username = ?", (me,), "one")
+    if not row or not check_password(cur, row[0]):
+        st.toast("Your current password isn't right.", icon="⚠️")
+    elif len(new) < 6:
+        st.toast("The new password needs at least 6 characters.", icon="⚠️")
+    elif new != new2:
+        st.toast("The two new passwords don't match.", icon="⚠️")
+    else:
+        run("UPDATE users SET password = ? WHERE username = ?", (hash_password(new), me))
+        for k in ("pw_cur", "pw_new", "pw_new2"):
+            st.session_state[k] = ""
+        st.toast("Password changed.", icon="🔑")
 
 
 def cb_sign_out():
@@ -1043,6 +1300,21 @@ def count_unread(me):
 
 CALL_TAG = "[[CALL]]"
 POST_TAG = "[[POST]]"   # a shared post inside a chat message
+REEL_TAG = "[[REEL]]"   # a shared reel inside a chat message
+
+
+def render_shared_reel(reel_id, key):
+    row = run("SELECT author_username, video_path, caption FROM reels WHERE id = ?", (reel_id,), "one")
+    with st.container(border=True):
+        if not row:
+            st.caption("📤 This reel is no longer available.")
+            return
+        author, vpath, cap = row
+        st.caption(f"📤 Shared reel by {get_display_name(author)}")
+        st.video(file_url(vpath))
+        if cap:
+            st.write(cap if len(cap) <= 160 else cap[:160] + "…")
+        st.button("👤 View profile", key=f"sr_{key}", on_click=cb_view_profile, args=(author,))
 
 
 def render_shared_post(post_id, key):
@@ -1092,6 +1364,8 @@ def start_call(me, other, link):
 
 
 def send_message(me, other, text):
+    if other in blocked_set(me):
+        return
     run("INSERT INTO messages (id, sender, receiver, text, created_at, is_read) VALUES (?, ?, ?, ?, ?, 0)",
         (str(uuid.uuid4()), me, other, text, utc_now().isoformat()))
 
@@ -1122,6 +1396,8 @@ def render_messages(me, other):
                         st.link_button("📞 Join call", text[len(CALL_TAG):], key=f"join_{sender}_{created_at}")
                     else:
                         st.write("📞 Voice call (ended)")
+                elif text.startswith(REEL_TAG):
+                    render_shared_reel(text[len(REEL_TAG):], f"dm_{msg_id}")
                 elif text.startswith(POST_TAG):
                     render_shared_post(text[len(POST_TAG):], f"dm_{msg_id}")
                 else:
@@ -1255,6 +1531,8 @@ def render_group_messages(me, gid):
                         st.link_button("📞 Join call", text[len(CALL_TAG):], key=f"gjoin_{gid}_{sender}_{created_at}")
                     else:
                         st.write("📞 Voice call (ended)")
+                elif text.startswith(REEL_TAG):
+                    render_shared_reel(text[len(REEL_TAG):], f"g_{msg_id}")
                 elif text.startswith(POST_TAG):
                     render_shared_post(text[len(POST_TAG):], f"g_{msg_id}")
                 else:
@@ -1287,6 +1565,98 @@ def cb_toggle_like(reel_id, me):
         run("DELETE FROM reel_likes WHERE reel_id = ? AND username = ?", (reel_id, me))
     else:
         run("INSERT OR IGNORE INTO reel_likes (reel_id, username) VALUES (?, ?)", (reel_id, me))
+
+
+REELS_CSS = """<style>
+/* Reels: swipe up and down; each reel snaps into place, with its buttons down the right-hand side */
+[data-testid="stMain"], section.main { scroll-snap-type: y proximity; }
+[class*="st-key-rlcard_"] {
+    position: relative; height: 80vh; height: min(80dvh, 780px); min-height: 460px;
+    background: #000; border-radius: 18px; overflow: hidden; margin: 0 0 14px 0;
+    scroll-snap-align: start; scroll-margin-top: 10px;
+}
+[class*="st-key-rlcard_"] [data-testid="stElementContainer"]:has(video) { position: absolute; inset: 0; z-index: 1; }
+[class*="st-key-rlcard_"] [data-testid="stVideo"], [class*="st-key-rlcard_"] video {
+    width: 100% !important; height: 100% !important; object-fit: contain; background: #000; }
+[class*="st-key-rlinfo_"] { position: absolute; left: 12px; right: 84px; bottom: 58px; z-index: 5; pointer-events: none; gap: 4px; }
+[class*="st-key-rlinfo_"], [class*="st-key-rlinfo_"] * { color: #fff !important; text-shadow: 0 1px 4px rgba(0,0,0,0.7); }
+[class*="st-key-rlinfo_"] p { margin: 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+[class*="st-key-rlrail_"] { position: absolute; right: 6px; bottom: 64px; width: 62px; z-index: 6; gap: 4px; align-items: stretch; }
+[class*="st-key-rlrail_"] > * { width: 100% !important; }
+[class*="st-key-rlrail_"] button {
+    background: rgba(0,0,0,0.38) !important; color: #fff !important; border: none !important; border-radius: 26px !important;
+    min-height: 44px; padding: 2px 4px !important; width: 100% !important; backdrop-filter: blur(6px); box-shadow: none !important; }
+[class*="st-key-rlrail_"] button p, [class*="st-key-rlrail_"] button span { color: #fff !important; font-size: 14px !important; margin: 0; line-height: 1.1; }
+[class*="st-key-rlrail_"] [data-testid="stIconMaterial"], [class*="st-key-rlrail_"] button svg { display: none !important; }
+</style>"""
+
+REELS_JS = """<script>
+(function () {
+  var pwin = window.parent, pdoc = pwin.document, token = Math.random();
+  function loud() { try { return !!(pwin.navigator.userActivation && pwin.navigator.userActivation.hasBeenActive); } catch (e) { return false; } }
+  function play(v) {
+    v.muted = !loud();
+    var p = v.play();
+    if (p && p.catch) p.catch(function () { v.muted = true; var q = v.play(); if (q && q.catch) q.catch(function () {}); });
+  }
+  var io = new pwin.IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      var v = e.target;
+      if (e.isIntersecting && e.intersectionRatio >= 0.6) { play(v); } else { try { v.pause(); } catch (x) {} }
+    });
+  }, { threshold: [0, 0.6, 1] });
+  function setup() {
+    pdoc.querySelectorAll('[class*="st-key-rlcard_"] video').forEach(function (v) {
+      if (v.__reelsToken === token) return;
+      v.__reelsToken = token; v.loop = true; v.setAttribute('playsinline', ''); v.preload = 'metadata'; io.observe(v);
+    });
+  }
+  setup();
+  var timer = null;
+  new pwin.MutationObserver(function () { clearTimeout(timer); timer = setTimeout(setup, 150); })
+    .observe(pdoc.body, { childList: true, subtree: true });
+})();
+</script>"""
+
+
+def short_count(n):
+    return f"{n/1000:.1f}k".replace(".0k", "k") if n >= 1000 else str(n)
+
+
+def load_reel_extras(ids, me):
+    """Likes, comments and saves for many reels in three queries."""
+    likes = {rid: (0, False) for rid in ids}
+    comments = {rid: [] for rid in ids}
+    saved = set()
+    if ids:
+        marks = ",".join("?" * len(ids))
+        for rid, n, mine in run(f"SELECT reel_id, COUNT(*), MAX(CASE WHEN username = ? THEN 1 ELSE 0 END) FROM reel_likes "
+                                f"WHERE reel_id IN ({marks}) GROUP BY reel_id", (me, *ids), "all"):
+            likes[rid] = (n, bool(mine))
+        for rid, name, text in run(f"""SELECT comments.post_id, users.display_name, comments.comment_text FROM comments
+                                       LEFT JOIN users ON comments.author_username = users.username
+                                       WHERE comments.post_id IN ({marks}) ORDER BY comments.created_at ASC""", tuple(ids), "all"):
+            comments.setdefault(rid, []).append((name, text))
+        saved = {r[0] for r in run(f"SELECT post_id FROM post_saves WHERE username = ? AND post_id IN ({marks})", (me, *ids), "all")}
+    return likes, comments, saved
+
+
+def cb_more_reels():
+    st.session_state.reel_limit = st.session_state.get("reel_limit", 8) + 8
+
+
+def cb_share_reel(reel_id, me):
+    code = st.session_state.get(f"rl_shto_{reel_id}")
+    targets = dict(share_targets(me))
+    if code not in targets:
+        st.toast("Pick someone to send it to.", icon="⚠️")
+        return
+    kind, ref = code.split(":", 1)
+    if kind == "u":
+        send_message(me, ref, REEL_TAG + reel_id)
+    else:
+        send_group_message(me, ref, REEL_TAG + reel_id)
+    st.toast(f"Shared with {targets[code].replace('👥 ', '')}", icon="📤")
 
 
 def cb_reel_step(step, total):
@@ -1369,7 +1739,7 @@ JOKES = [
 APP_HELP = [  # (words to look for, answer). The first match wins, so order matters.
     (("delete", "remove"), "You can delete your own reels with the 🗑️ Delete button on the 🎬 Reels page. Deleting posts isn't available yet."),
     (("sign out", "log out", "logout"), "Open ⚙️ Profile Settings in the left sidebar. The Sign out button is at the bottom of that box."),
-    (("password",), "Passwords can't be changed inside the app yet."),
+    (("password",), "You can change your password in the sidebar under 🔒 Account & privacy."),
     (("friend", "friends", "follow"), "Open 👥 Friends, search for their username and tap ➕ Add friend. You can also tap Add friend next to anyone's post or reel. When they accept, you can chat in 💬 Chats."),
     (("profile picture", "profile pic", "avatar", "pfp"), "Open ⚙️ Profile Settings in the left sidebar, choose a picture, then tap Save picture."),
     (("theme", "themes", "colour", "colours", "color", "colors", "dark mode"), "Open 🎨 Theme in the left sidebar. Pick a preset, or choose Custom to pick your own three colours. It saves to your account."),
@@ -1688,10 +2058,12 @@ if "page" not in st.session_state:
 if "avatar_nonce" not in st.session_state:
     st.session_state.avatar_nonce = 0
 
-pending_count = len(get_incoming_requests(current_user))
-unread_count = count_unread(current_user)
+pending_count = ttl_cache(f"pend_{current_user}", 4, lambda: len(get_incoming_requests(current_user)))
+unread_count = ttl_cache(f"unread_{current_user}", 4, lambda: count_unread(current_user))
 
-alert_n = alert_count(current_user)
+alert_n = ttl_cache(f"alerts_{current_user}", 4, lambda: alert_count(current_user))
+admin_mode = is_admin(current_user)
+open_reports = ttl_cache("open_reports", 10, lambda: run("SELECT COUNT(*) FROM reports", fetch="one")[0]) if admin_mode else 0
 
 PAGE_LABELS = {
     "feed": "🏠 Feed",
@@ -1703,6 +2075,8 @@ PAGE_LABELS = {
     "chats": "💬 Chats" + (f" ({unread_count} new)" if unread_count else ""),
     "yuaan": "🤖 Yuaan",
 }
+if admin_mode:
+    PAGE_LABELS["admin"] = "🛡 Admin" + (f" ({open_reports} reports)" if open_reports else "")
 
 with st.sidebar:
     st.markdown(person_html(current_user, size=56, subtitle="Welcome to Yuaan Post"), unsafe_allow_html=True)
@@ -1741,6 +2115,19 @@ with st.sidebar:
         st.divider()
         st.button("Sign out", on_click=cb_sign_out)
 
+    with st.expander("🔒 Account & privacy"):
+        st.text_input("Current password", type="password", key="pw_cur")
+        st.text_input("New password (6+ characters)", type="password", key="pw_new")
+        st.text_input("New password again", type="password", key="pw_new2")
+        st.button("Change password", key="pw_btn", on_click=cb_change_password)
+        st.divider()
+        mine_blocked = [r[0] for r in run("SELECT blocked FROM blocks WHERE blocker = ? ORDER BY created_at DESC", (current_user,), "all")]
+        st.caption(f"Blocked people ({len(mine_blocked)})")
+        for u in mine_blocked:
+            c1, c2 = st.columns([3, 2])
+            c1.write(get_display_name(u))
+            c2.button("Unblock", key=f"unblock_{u}", on_click=cb_unblock_user, args=(current_user, u))
+
     with st.expander("🎨 Theme"):
         saved = get_theme_value(current_user)
         saved_name = "Custom" if saved.startswith("custom|") else (saved if saved in THEMES else "Pop")
@@ -1759,7 +2146,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v36")
+    st.caption("Design v40")
 
 # ------------------------------------------
 # Shared by the Feed and For You pages
@@ -1831,7 +2218,7 @@ def recommend_posts(me, circle, limit=8):
     """Posts from people you don't know yet, best first: connected to your circle, talked about, with photos, and new.
     Returns [(post, reason), ...]."""
     rows = [r for r in run("SELECT id, note, created_at, author_username FROM posts WHERE author_username <> ? "
-                           "ORDER BY created_at DESC LIMIT 100", (me,), "all") if r[3] not in circle]
+                           "ORDER BY created_at DESC LIMIT 100", (me,), "all") if r[3] not in circle and r[3] not in blocked_set(me)]
     if not rows:
         return []
     marks = ",".join("?" * len(rows))
@@ -1895,21 +2282,29 @@ def cb_decline_call(call_id):
 
 @st.fragment(run_every=3)
 def incoming_call_watcher(me):
+    # this also works as a heartbeat: it records that I'm here, at most once every 45 seconds
+    if time.time() - st.session_state.get("_hb", 0) > 45:
+        st.session_state["_hb"] = time.time()
+        try:
+            _execute("UPDATE users SET last_seen = ? WHERE username = ?", (utc_now().isoformat(), me), None)
+        except Exception:
+            pass
     cutoff = (utc_now() - timedelta(seconds=45)).isoformat()
     dismissed = st.session_state.get("dismissed_calls", set())
     found = None
-    row = run("SELECT id, sender, text FROM messages WHERE receiver = ? AND text LIKE ? AND created_at > ? "
-              "ORDER BY created_at DESC LIMIT 1", (me, CALL_TAG + "%", cutoff), "one")
-    if row and row[0] not in dismissed:
-        found = (row[0], row[2], f"{get_display_name(row[1])} is calling you...")
-    if not found:
-        grow = run('''SELECT m.id, m.sender, m.text, g.name FROM group_messages m
-                      JOIN group_members gm ON gm.group_id = m.group_id
-                      JOIN group_chats g ON g.id = m.group_id
-                      WHERE gm.username = ? AND m.sender <> ? AND m.text LIKE ? AND m.created_at > ?
-                      ORDER BY m.created_at DESC LIMIT 1''', (me, me, CALL_TAG + "%", cutoff), "one")
-        if grow and grow[0] not in dismissed:
-            found = (grow[0], grow[2], f"{get_display_name(grow[1])} started a call in {grow[3]}")
+    rows = run('''SELECT id, sender, text, '' AS gname, created_at FROM messages
+                  WHERE receiver = ? AND text LIKE ? AND created_at > ?
+                  UNION ALL
+                  SELECT m.id, m.sender, m.text, g.name, m.created_at FROM group_messages m
+                  JOIN group_members gm ON gm.group_id = m.group_id
+                  JOIN group_chats g ON g.id = m.group_id
+                  WHERE gm.username = ? AND m.sender <> ? AND m.text LIKE ? AND m.created_at > ?
+                  ORDER BY created_at DESC LIMIT 3''', (me, CALL_TAG + "%", cutoff, me, me, CALL_TAG + "%", cutoff), "all")
+    for cid, sender, ctext, gname, _ in rows:
+        if cid not in dismissed:
+            who = get_display_name(sender)
+            found = (cid, ctext, f"{who} started a call in {gname}" if gname else f"{who} is calling you...")
+            break
     if not found:
         return
     call_id, text, title = found
@@ -1932,6 +2327,11 @@ incoming_call_watcher(current_user)
 # ------------------------------------------
 if st.session_state.page == "feed":
     banner("Yuaan Post", "See what your friends are up to, or post something new.", "feed")
+
+    story_circle = set(get_friends(current_user)) | set(get_following(current_user))
+    story_viewer(current_user)
+    stories_strip(current_user, story_circle)
+    add_story_ui(current_user)
 
     chosen = parse_song(st.session_state.get("post_song"))
     with st.expander("🎵 Add a song to your post" + (" ✅" if chosen else "")):
@@ -2000,9 +2400,12 @@ if st.session_state.page == "feed":
     st.write("")
     st.header("Latest posts")
 
-    posts = run("SELECT id, note, created_at, author_username FROM posts ORDER BY created_at DESC LIMIT 40", fetch="all")
+    hidden = blocked_set(current_user)
+    posts = [p for p in run("SELECT id, note, created_at, author_username FROM posts ORDER BY created_at DESC LIMIT 60", fetch="all")
+             if p[3] not in hidden][:40]
     if not posts:
         st.info("Nothing here yet. Write the first post above.")
+    prefetch_people([p[3] for p in posts])
     media_by_post, comments_by_post = fetch_post_extras([p[0] for p in posts])
     for idx, post in enumerate(posts):
         render_post_card(idx, post, media_by_post.get(post[0], []), comments_by_post.get(post[0], []), "feed")
@@ -2023,6 +2426,7 @@ elif st.session_state.page == "foryou":
                            "ORDER BY created_at DESC LIMIT 15", tuple(circle), "all")
     suggestions = recommend_posts(current_user, circle)
 
+    prefetch_people([p[3] for p in friend_posts] + [p[0][3] for p in suggestions])
     media_by_post, comments_by_post = fetch_post_extras([p[0] for p in friend_posts] + [p[0][0] for p in suggestions])
 
     st.header("From your friends")
@@ -2044,7 +2448,7 @@ elif st.session_state.page == "foryou":
 # PAGE: Reels (short videos, one at a time)
 # ------------------------------------------
 elif st.session_state.page == "reels":
-    banner("Reels", "Short videos from everyone. Use the arrows to move between them.", "reels")
+    banner("Reels", "Swipe up and down to watch. Your buttons are on the right.", "reels")
 
     with st.expander("➕ Upload a reel"):
         with st.form("reel_form", clear_on_submit=True):
@@ -2069,53 +2473,60 @@ elif st.session_state.page == "reels":
                     except (RuntimeError, requests.RequestException):
                         st.error("The reel couldn't be uploaded. Please try again.")
 
-    reels = get_reels()
+    hidden = blocked_set(current_user)
+    all_reels = [r for r in get_reels() if r[1] not in hidden]
+    reel_limit = st.session_state.get("reel_limit", 8)
+    reels = all_reels[:reel_limit]
     if not reels:
         st.info("No reels yet. Upload the first one above.")
     else:
-        total = len(reels)
-        idx = min(max(st.session_state.get("reel_idx", 0), 0), total - 1)
-        st.session_state.reel_idx = idx
-        reel_id, author, video_path, caption, created_at = reels[idx]
-        like_count, liked = reel_likes(reel_id, current_user)
-        time_str = thai_time(created_at, "%d %b %Y, %H:%M")
-
-        with st.container(border=True):
-            h_left, h_right, h_right2 = st.columns([4, 2, 2])
-            h_left.markdown(person_html(author, size=48, subtitle=f"🕒 {time_str}"), unsafe_allow_html=True)
-            friend_button(h_right, current_user, author, f"reelfriend_{reel_id}")
-            follow_button(h_right2, current_user, author, f"reelfollow_{reel_id}")
-            st.video(file_url(video_path), loop=True, autoplay=True, muted=True)
-            if caption:
-                st.markdown(f'<div style="white-space: pre-wrap; margin: 6px 0;">{html.escape(caption)}</div>', unsafe_allow_html=True)
-
-            c_prev, c_like, c_prof, c_del, c_next = st.columns([2, 2, 2, 2, 2])
-            c_prof.button("👤 Profile", key="reel_prof", on_click=cb_view_profile, args=(author,), use_container_width=True)
-            c_prev.button("⬆️ Previous", key="reel_prev", on_click=cb_reel_step, args=(-1, total), use_container_width=True)
-            c_like.button(f"{'❤️' if liked else '🤍'} {like_count}", key="reel_like", on_click=cb_toggle_like,
-                          args=(reel_id, current_user), type="primary" if liked else "secondary", use_container_width=True)
-            if author == current_user:
-                c_del.button("🗑️ Delete", key="reel_del", on_click=cb_delete_reel, args=(reel_id, current_user), use_container_width=True)
-            c_next.button("Next ⬇️", key="reel_next", on_click=cb_reel_step, args=(1, total), use_container_width=True)
-            st.caption(f"Reel {idx + 1} of {total}")
-
-            reel_comments = run('''
-                SELECT users.display_name, comments.comment_text
-                FROM comments
-                LEFT JOIN users ON comments.author_username = users.username
-                WHERE comments.post_id = ?
-                ORDER BY comments.created_at ASC
-            ''', (reel_id,), "all")
-            with st.expander(f"💬 comment ({len(reel_comments)} comment)"):
-                for c_author, c_text in reel_comments:
-                    st.markdown(f"**{c_author or 'Unknown'}**: {c_text}")
-                with st.form(f"reel_comment_form_{reel_id}", clear_on_submit=True):
-                    new_reel_comment = st.text_input("comment...")
-                    if st.form_submit_button("send"):
-                        if new_reel_comment:
-                            run("INSERT INTO comments (id, post_id, author_username, comment_text, created_at) VALUES (?, ?, ?, ?, ?)",
-                                (str(uuid.uuid4()), reel_id, current_user, new_reel_comment, utc_now().isoformat()))
-                            st.rerun()
+        st.markdown(REELS_CSS, unsafe_allow_html=True)
+        prefetch_people([r[1] for r in reels])
+        reel_likes_map, reel_comments_map, reel_saved = load_reel_extras([r[0] for r in reels], current_user)
+        reel_targets = share_targets(current_user)
+        i_follow = my_relations(current_user)[1]
+        for reel_id, author, video_path, caption, created_at in reels:
+            n_likes, liked = reel_likes_map.get(reel_id, (0, False))
+            comments_here = reel_comments_map.get(reel_id, [])
+            with st.container(key=f"rlcard_{reel_id}"):
+                st.video(file_url(video_path), loop=True)
+                with st.container(key=f"rlinfo_{reel_id}"):
+                    st.markdown(person_html(author, size=34, subtitle=f"🕒 {thai_time(created_at, '%d %b, %H:%M')}"), unsafe_allow_html=True)
+                    if caption:
+                        st.markdown(html.escape(caption))
+                with st.container(key=f"rlrail_{reel_id}"):
+                    if author != current_user:
+                        st.button("✅" if author in i_follow else "➕", key=f"rl_fol_{reel_id}", on_click=cb_toggle_follow,
+                                  args=(current_user, author), help="Following" if author in i_follow else "Follow")
+                    st.button(f"{'❤️' if liked else '🤍'} {short_count(n_likes)}", key=f"rl_like_{reel_id}",
+                              on_click=cb_toggle_like, args=(reel_id, current_user))
+                    with st.popover(f"💬 {short_count(len(comments_here))}", use_container_width=True):
+                        if not comments_here:
+                            st.caption("No comments yet.")
+                        for c_author, c_text in comments_here:
+                            st.markdown(f"**{c_author or 'Unknown'}**: {c_text}")
+                        with st.form(f"reel_comment_form_{reel_id}", clear_on_submit=True):
+                            new_reel_comment = st.text_input("comment...")
+                            if st.form_submit_button("send"):
+                                if new_reel_comment:
+                                    run("INSERT INTO comments (id, post_id, author_username, comment_text, created_at) VALUES (?, ?, ?, ?, ?)",
+                                        (str(uuid.uuid4()), reel_id, current_user, new_reel_comment, utc_now().isoformat()))
+                                    st.rerun()
+                    with st.popover("📤", use_container_width=True):
+                        if not reel_targets:
+                            st.caption("Add a friend first, then you can share reels with them.")
+                        else:
+                            st.selectbox("Send to", [t[0] for t in reel_targets], format_func=dict(reel_targets).get, key=f"rl_shto_{reel_id}")
+                            st.button("Send", key=f"rl_shsend_{reel_id}", on_click=cb_share_reel, args=(reel_id, current_user))
+                    st.button("🔖✓" if reel_id in reel_saved else "🔖", key=f"rl_save_{reel_id}", on_click=cb_toggle_save,
+                              args=(reel_id, current_user), help="Saved" if reel_id in reel_saved else "Save")
+                    with st.popover("⋯", use_container_width=True):
+                        st.button("👤 Profile", key=f"rl_prof_{reel_id}", on_click=cb_view_profile, args=(author,))
+                        if author == current_user:
+                            st.button("🗑️ Delete reel", key=f"rl_del_{reel_id}", on_click=cb_delete_reel, args=(reel_id, current_user))
+        if len(all_reels) > reel_limit:
+            st.button("⬇ Load more reels", key="rl_more", on_click=cb_more_reels, use_container_width=True)
+        components.html(REELS_JS, height=0)
 
 # ------------------------------------------
 # PAGE: Friends (requests, search, friend list)
@@ -2232,7 +2643,7 @@ elif st.session_state.page == "chats":
 
         other = st.selectbox("Chat with", friends, format_func=friend_label, key="chat_with")
 
-        st.markdown(person_html(other, size=36), unsafe_allow_html=True)
+        st.markdown(person_html(other, size=36, subtitle=f"@{html.escape(other)} · {presence_text(other)}"), unsafe_allow_html=True)
         with st.expander(f"📞 Start a Google Meet call with {get_display_name(other)}"):
             call_ui("dmcall", lambda link: start_call(current_user, other, link))
         render_messages(current_user, other)
@@ -2251,9 +2662,18 @@ elif st.session_state.page == "profile":
     st.button("← Back to Feed", key="profile_back", on_click=cb_go_page, args=("feed",))
     if not exists:
         st.info("That person wasn't found.")
+    elif target != current_user and target in blocked_set(current_user):
+        banner(get_display_name(target), f"@{target}", "profile")
+        if run("SELECT 1 FROM blocks WHERE blocker = ? AND blocked = ?", (current_user, target), "one"):
+            st.info("You blocked this person.")
+            st.button("Unblock", key="prof_unblock", on_click=cb_unblock_user, args=(current_user, target))
+        else:
+            st.info("This profile isn't available.")
     else:
         banner(get_display_name(target), f"@{target}", "profile")
         st.markdown(avatar_html(target, size=96), unsafe_allow_html=True)
+        if target == current_user or friendship_status(current_user, target) == "friends":
+            st.caption(presence_text(target))
         bio = get_bio(target)
         if bio:
             st.markdown(f'<div style="white-space: pre-wrap; margin: 6px 0 10px;">{html.escape(bio)}</div>', unsafe_allow_html=True)
@@ -2274,6 +2694,12 @@ elif st.session_state.page == "profile":
             if friendship_status(current_user, target) == "friends":
                 b3.button("💬 Message", key="prof_msg", on_click=cb_open_chat, args=(target,), use_container_width=True)
 
+        if target != current_user:
+            with st.expander("⚙️ More"):
+                st.button("🚫 Block this person", key="prof_block", on_click=cb_block_user, args=(current_user, target))
+                st.text_input("Why are you reporting them? (optional)", key=f"report_reason_{target}", max_chars=300)
+                st.button("🚩 Report this person", key="prof_report", on_click=cb_report_user, args=(current_user, target))
+
         with st.expander(f"Followers ({n_followers})"):
             people = get_followers(target)
             if not people:
@@ -2291,7 +2717,8 @@ elif st.session_state.page == "profile":
                 c1.markdown(person_html(u), unsafe_allow_html=True)
                 c2.button("👤 Profile", key=f"pf_fng_{u}", on_click=cb_view_profile, args=(u,))
 
-        tab_posts, tab_reels = st.tabs(["Posts", "Reels"])
+        profile_tabs = st.tabs(["Posts", "Reels"] + (["🔖 Saved"] if target == current_user else []))
+        tab_posts, tab_reels = profile_tabs[0], profile_tabs[1]
         with tab_posts:
             their_posts = run("SELECT id, note, created_at FROM posts WHERE author_username = ? ORDER BY created_at DESC",
                               (target,), "all")
@@ -2315,6 +2742,33 @@ elif st.session_state.page == "profile":
                     st.video(file_url(r_path))
                     if r_caption:
                         st.caption(r_caption)
+
+
+        if len(profile_tabs) == 3:
+            with profile_tabs[2]:
+                saved_posts = run("""SELECT p.id, p.note, p.created_at, p.author_username FROM post_saves sv
+                                     JOIN posts p ON p.id = sv.post_id WHERE sv.username = ?
+                                     ORDER BY sv.created_at DESC LIMIT 40""", (current_user,), "all")
+                saved_posts = [p for p in saved_posts if p[3] not in blocked_set(current_user)]
+                if not saved_posts:
+                    st.caption("Nothing saved yet. Tap 🔖 Save on a post to keep it here.")
+                prefetch_people([p[3] for p in saved_posts])
+                sv_media, sv_comments = fetch_post_extras([p[0] for p in saved_posts])
+                for idx, post in enumerate(saved_posts):
+                    render_post_card(idx, post, sv_media.get(post[0], []), sv_comments.get(post[0], []), "sv")
+                saved_reels = [r for r in run("""SELECT r.id, r.author_username, r.video_path, r.caption FROM post_saves sv
+                                                 JOIN reels r ON r.id = sv.post_id WHERE sv.username = ?
+                                                 ORDER BY sv.created_at DESC LIMIT 20""", (current_user,), "all")
+                               if r[1] not in blocked_set(current_user)]
+                if saved_reels:
+                    st.subheader("Saved reels")
+                for r_id, r_author, r_path, r_cap in saved_reels:
+                    with st.container(border=True):
+                        st.caption(f"Reel by {get_display_name(r_author)}")
+                        st.video(file_url(r_path))
+                        if r_cap:
+                            st.caption(r_cap)
+                        st.button("🔖 Remove", key=f"svr_{r_id}", on_click=cb_toggle_save, args=(r_id, current_user))
 
 # ------------------------------------------
 # PAGE: Yuaan (built-in helper)
@@ -2341,8 +2795,9 @@ elif st.session_state.page == "search":
             st.caption("Type a name or word above. Put #hashtags in your posts and they'll show up here as trends.")
     else:
         like = f"%{q.lstrip('@')}%"
-        people = run('''SELECT username FROM users WHERE username ILIKE ? OR display_name ILIKE ?
-                       ORDER BY username LIMIT 15''', (like, like), "all")
+        hidden = blocked_set(current_user)
+        people = [r for r in run('''SELECT username FROM users WHERE username ILIKE ? OR display_name ILIKE ?
+                       ORDER BY username LIMIT 25''', (like, like), "all") if r[0] not in hidden][:15]
         st.subheader(f"People ({len(people)})")
         if not people:
             st.caption("No people found.")
@@ -2350,11 +2805,12 @@ elif st.session_state.page == "search":
             c1, c2 = st.columns([5, 2])
             c1.markdown(person_html(u), unsafe_allow_html=True)
             c2.button("👤 Profile", key=f"sr_prof_{u}", on_click=cb_view_profile, args=(u,))
-        posts = run("SELECT id, note, created_at, author_username FROM posts WHERE note ILIKE ? "
-                    "ORDER BY created_at DESC LIMIT 20", (f"%{q}%",), "all")
+        posts = [p for p in run("SELECT id, note, created_at, author_username FROM posts WHERE note ILIKE ? "
+                                "ORDER BY created_at DESC LIMIT 30", (f"%{q}%",), "all") if p[3] not in hidden][:20]
         st.subheader(f"Posts ({len(posts)})")
         if not posts:
             st.caption("No posts found.")
+        prefetch_people([p[3] for p in posts])
         media_by_post, comments_by_post = fetch_post_extras([p[0] for p in posts])
         for idx, post in enumerate(posts):
             render_post_card(idx, post, media_by_post.get(post[0], []), comments_by_post.get(post[0], []), "srch")
@@ -2387,6 +2843,37 @@ elif st.session_state.page == "alerts":
                     c2.button("👤 Profile", key=f"al_p_{i}", on_click=cb_view_profile, args=(who,))
             c2.button("✖ Dismiss", key=f"al_x_{akey}", on_click=cb_dismiss_alert, args=(current_user, akey))
             st.caption(f"🕒 {thai_time(at, '%d %b, %H:%M')}")
+
+elif st.session_state.page == "admin":
+    banner("Admin", "Only accounts on the admin list can see this page.", "admin")
+    if not is_admin(current_user):
+        st.info("This page isn't available.")
+    else:
+        n_users = run("SELECT COUNT(*) FROM users", fetch="one")[0]
+        n_posts = run("SELECT COUNT(*) FROM posts", fetch="one")[0]
+        n_reels = run("SELECT COUNT(*) FROM reels", fetch="one")[0]
+        n_new = run("SELECT COUNT(*) FROM users WHERE last_seen > ?", ((utc_now() - timedelta(days=1)).isoformat(),), "one")[0]
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("People", n_users)
+        m2.metric("Posts", n_posts)
+        m3.metric("Reels", n_reels)
+        m4.metric("Active today", n_new)
+
+        reports = run("SELECT id, reporter, reported, reason, created_at FROM reports ORDER BY created_at DESC LIMIT 100", fetch="all")
+        times_reported = dict(run("SELECT reported, COUNT(*) FROM reports GROUP BY reported", fetch="all"))
+        st.subheader(f"🚩 Reports ({len(reports)})")
+        if not reports:
+            st.success("No reports. All quiet.")
+        for rid, reporter, reported, reason, at in reports:
+            with st.container(border=True):
+                st.markdown(f"**{html.escape(get_display_name(reported))}** (@{html.escape(reported)}) "
+                            f"was reported by **{html.escape(get_display_name(reporter))}** (@{html.escape(reporter)})",
+                            unsafe_allow_html=True)
+                st.caption(f"🕒 {thai_time(at, '%d %b %Y, %H:%M')} · reported {times_reported.get(reported, 1)} time(s) in total")
+                st.markdown(f"> {html.escape(reason)}" if reason else "_No reason given._")
+                b1, b2 = st.columns(2)
+                b1.button("👤 View profile", key=f"adm_prof_{rid}", on_click=cb_view_profile, args=(reported,), use_container_width=True)
+                b2.button("✅ Clear report", key=f"adm_clear_{rid}", on_click=cb_resolve_report, args=(rid, current_user), use_container_width=True)
 
 elif st.session_state.page == "yuaan":
     banner("Yuaan", "Your built-in helper for captions, ideas and app tips.", "yuaan")
