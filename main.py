@@ -1938,14 +1938,14 @@ def ask_gemini(turns, name):
     st.session_state.yuaan_status = ""
     try:
         resp = None
-        for model in ("gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash-lite"):
+        for model in ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-flash-lite-latest"):
             resp = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                 headers={"x-goog-api-key": key, "Content-Type": "application/json"},
                 json={"system_instruction": {"parts": [{"text": YUAAN_SYSTEM + f" The person's name is {name}."}]},
                       "contents": contents, "generationConfig": {"maxOutputTokens": 400}},
                 timeout=20)
-            if resp.status_code not in (429, 404):
+            if resp.status_code not in (429, 404, 500, 502, 503, 504):
                 break
         if resp.status_code != 200:
             try:
