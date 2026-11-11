@@ -31,6 +31,9 @@ def thai_time(iso, fmt):
 # 1. Setup
 # ==========================================
 st.set_page_config(page_title="Yuaan Post", page_icon="📸", layout="centered")
+_script_start = time.perf_counter()
+st.session_state["_dbq"] = 0
+st.session_state["_dbt"] = 0.0
 
 BUCKET = "uploads"   # name of the Supabase Storage bucket for photos, reels and profile pictures
 ADMINS = {"yuaan.admin"}   # accounts that see the extra 🛡 Admin page (reports). Add more with ADMIN_USERS in Secrets.
@@ -291,6 +294,18 @@ def _to_pg(sql):
 
 
 def _execute(sql, params, fetch):
+    t_start = time.perf_counter()
+    try:
+        return _execute_inner(sql, params, fetch)
+    finally:
+        try:  # shown to the admin only: how many database trips this page needed and how long they took
+            st.session_state["_dbq"] = st.session_state.get("_dbq", 0) + 1
+            st.session_state["_dbt"] = st.session_state.get("_dbt", 0.0) + (time.perf_counter() - t_start)
+        except Exception:
+            pass
+
+
+def _execute_inner(sql, params, fetch):
     sql = _to_pg(sql)
     for attempt in (1, 2):
         pool = get_pool()
@@ -558,6 +573,25 @@ def alert_count(me):
     return row[0] if row else 0
 
 
+def sidebar_counts(me):
+    """Friend requests, unread messages and new alerts in ONE database question: (pending, unread, alerts)."""
+    row = run('''WITH s AS (SELECT COALESCE(notif_seen_at, '1970-01-01T00:00:00') AS seen FROM users WHERE username = ?)
+        SELECT
+          (SELECT COUNT(*) FROM friendships WHERE addressee = ? AND status = 'pending'),
+          (SELECT COUNT(*) FROM messages WHERE receiver = ? AND is_read = 0),
+          (SELECT COUNT(*) FROM follows WHERE followee = ? AND created_at > (SELECT seen FROM s))
+        + (SELECT COUNT(*) FROM friendships WHERE addressee = ? AND status = 'pending' AND created_at > (SELECT seen FROM s))
+        + (SELECT COUNT(*) FROM post_likes l JOIN posts p ON p.id = l.post_id
+           WHERE p.author_username = ? AND l.username <> ? AND l.created_at > (SELECT seen FROM s))
+        + (SELECT COUNT(*) FROM comments c JOIN posts p ON p.id = c.post_id
+           WHERE p.author_username = ? AND c.author_username <> ? AND c.created_at > (SELECT seen FROM s))
+        + (SELECT COUNT(*) FROM messages WHERE receiver = ? AND is_read = 0 AND created_at > (SELECT seen FROM s) AND text NOT LIKE ?)
+        + (SELECT COUNT(*) FROM group_messages m JOIN group_members gm ON gm.group_id = m.group_id AND gm.username = ?
+           WHERE m.sender <> ? AND m.created_at > (SELECT seen FROM s) AND m.text NOT LIKE ?)''',
+        (me, me, me, me, me, me, me, me, me, me, CALL_TAG + "%", me, me, CALL_TAG + "%"), "one")
+    return (row[0], row[1], row[2]) if row else (0, 0, 0)
+
+
 def alert_items(me, limit=40):
     """[(created_at, who, text, kind, ref)] newest first: followers, friend requests, likes, comments and unread messages."""
     items = []
@@ -735,7 +769,7 @@ def cb_open_alerts(me):
 def get_theme_value(username):
     if not username:
         return "Pop"
-    row = run("SELECT theme FROM users WHERE username = ?", (username,), "one")
+    row = ttl_cache(f"theme_{username}", 30, lambda: run("SELECT theme FROM users WHERE username = ?", (username,), "one"))
     return row[0] if row and row[0] else "Pop"
 
 
@@ -907,10 +941,14 @@ def friendship_status(me, other):
 
 
 def get_friends(me):
-    rows = run('''SELECT CASE WHEN requester = ? THEN addressee ELSE requester END
-                  FROM friendships WHERE status = 'accepted' AND (requester = ? OR addressee = ?)''',
-               (me, me, me), "all")
-    return sorted([r[0] for r in rows], key=lambda u: get_display_name(u).lower())
+    if me == st.session_state.get("username"):   # my own friends: already loaded for this page
+        people = [o for o, (_, status) in my_relations(me)[0].items() if status == "accepted"]
+    else:
+        rows = run('''SELECT CASE WHEN requester = ? THEN addressee ELSE requester END
+                      FROM friendships WHERE status = 'accepted' AND (requester = ? OR addressee = ?)''',
+                   (me, me, me), "all")
+        people = [r[0] for r in rows]
+    return sorted(people, key=lambda u: get_display_name(u).lower())
 
 
 def get_incoming_requests(me):
@@ -923,6 +961,16 @@ def is_admin(username):
     return username in ADMINS or username in extra
 
 
+def cb_speed_test():
+    """Times 5 tiny database questions: the answer is the round trip to the database server."""
+    times = []
+    for _ in range(5):
+        t0 = time.perf_counter()
+        _execute("SELECT 1", (), "one")
+        times.append((time.perf_counter() - t0) * 1000)
+    st.session_state["speed_result"] = (min(times), sum(times) / len(times), max(times))
+
+
 def cb_resolve_report(report_id, me):
     if is_admin(me):
         run("DELETE FROM reports WHERE id = ?", (report_id,))
@@ -930,10 +978,23 @@ def cb_resolve_report(report_id, me):
         st.toast("Report cleared", icon="✅")
 
 
+def block_sets(me):
+    """(people I blocked, people who blocked me) from one database question."""
+    def load():
+        mine, theirs = set(), set()
+        for a, b in run("SELECT blocker, blocked FROM blocks WHERE blocker = ? OR blocked = ?", (me, me), "all"):
+            if a == me:
+                mine.add(b)
+            else:
+                theirs.add(a)
+        return mine, theirs
+    return ttl_cache(f"blk_{me}", 15, load)
+
+
 def blocked_set(me):
     """Everyone I blocked plus everyone who blocked me (neither side sees the other)."""
-    return ttl_cache(f"blk_{me}", 15, lambda: {r[0] for r in run(
-        "SELECT blocked FROM blocks WHERE blocker = ? UNION SELECT blocker FROM blocks WHERE blocked = ?", (me, me), "all")})
+    mine, theirs = block_sets(me)
+    return mine | theirs
 
 
 def cb_block_user(me, other):
@@ -1157,9 +1218,11 @@ def cb_song_remove():
 
 def share_targets(me):
     """Friends and groups a post can be sent to: [(code, label)]; codes are 'u:username' or 'g:group_id'."""
-    out = [(f"u:{u}", f"{get_display_name(u)} (@{u})") for u in get_friends(me)]
-    out += [(f"g:{gid}", f"👥 {name}") for gid, name in my_groups(me)]
-    return out
+    def load():
+        out = [(f"u:{u}", f"{get_display_name(u)} (@{u})") for u in get_friends(me)]
+        out += [(f"g:{gid}", f"👥 {name}") for gid, name in my_groups(me)]
+        return out
+    return ttl_cache(f"share_{me}", 20, load)
 
 
 def cb_share_post(post_id, prefix, me):
@@ -1177,23 +1240,23 @@ def cb_share_post(post_id, prefix, me):
 
 
 def load_likes(post_ids, me):
-    """Like counts and 'did I like it' for many posts in one query; post_actions reads them from here."""
+    """Likes, saves and songs for many posts in ONE question; post_actions and the post cards read them from here."""
     info = {pid: (0, False) for pid in post_ids}
+    songs, saved = {}, set()
     if post_ids:
         marks = ",".join("?" * len(post_ids))
-        for pid, n, mine in run(f"SELECT post_id, COUNT(*), MAX(CASE WHEN username = ? THEN 1 ELSE 0 END) "
-                                f"FROM post_likes WHERE post_id IN ({marks}) GROUP BY post_id", (me, *post_ids), "all"):
+        for pid, n, mine, sv, song in run(f"""SELECT p.id,
+                (SELECT COUNT(*) FROM post_likes l WHERE l.post_id = p.id),
+                (SELECT COUNT(*) FROM post_likes l2 WHERE l2.post_id = p.id AND l2.username = ?),
+                (SELECT COUNT(*) FROM post_saves sv WHERE sv.post_id = p.id AND sv.username = ?),
+                p.song FROM posts p WHERE p.id IN ({marks})""", (me, me, *post_ids), "all"):
             info[pid] = (n, bool(mine))
+            if sv:
+                saved.add(pid)
+            if song:
+                songs[pid] = song
     st.session_state["_likes"] = info
-    songs = {}
-    if post_ids:
-        marks2 = ",".join("?" * len(post_ids))
-        songs = {pid: song for pid, song in run(f"SELECT id, song FROM posts WHERE id IN ({marks2})", tuple(post_ids), "all") if song}
     st.session_state["_songs"] = songs
-    saved = set()
-    if post_ids:
-        marks3 = ",".join("?" * len(post_ids))
-        saved = {r[0] for r in run(f"SELECT post_id FROM post_saves WHERE username = ? AND post_id IN ({marks3})", (me, *post_ids), "all")}
     st.session_state["_saved"] = saved
     st.session_state["_share_targets"] = share_targets(me) if post_ids else []
 
@@ -1465,6 +1528,7 @@ def cb_create_group(me):
         (gid, name, me, utc_now().isoformat()))
     for u in [me] + picked:
         run("INSERT OR IGNORE INTO group_members (group_id, username) VALUES (?, ?)", (gid, u))
+    st.session_state.pop("_ttl", None)
     st.session_state.new_group_name = ""
     st.session_state.new_group_members = []
     st.session_state.chat_group = gid
@@ -1488,6 +1552,7 @@ def cb_leave_group(me, gid):
         run("DELETE FROM group_messages WHERE group_id = ?", (gid,))
         run("DELETE FROM group_chats WHERE id = ?", (gid,))
     st.session_state.pop("chat_group", None)
+    st.session_state.pop("_ttl", None)
     st.toast("You left the group", icon="👋")
 
 
@@ -1938,13 +2003,14 @@ def ask_gemini(turns, name):
     st.session_state.yuaan_status = ""
     try:
         resp = None
+        # stable models first; if one is busy (503), over quota (429) or gone (404), try the next
         for model in ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-flash-lite-latest"):
             resp = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                 headers={"x-goog-api-key": key, "Content-Type": "application/json"},
                 json={"system_instruction": {"parts": [{"text": YUAAN_SYSTEM + f" The person's name is {name}."}]},
                       "contents": contents, "generationConfig": {"maxOutputTokens": 400}},
-                timeout=20)
+                timeout=12)
             if resp.status_code not in (429, 404, 500, 502, 503, 504):
                 break
         if resp.status_code != 200:
@@ -2051,6 +2117,7 @@ if not st.session_state.logged_in:
 # 6. Main app (after login)
 # ==========================================
 current_user = st.session_state.username
+prefetch_people([current_user])
 display_name = get_display_name(current_user)
 
 if "page" not in st.session_state:
@@ -2058,10 +2125,8 @@ if "page" not in st.session_state:
 if "avatar_nonce" not in st.session_state:
     st.session_state.avatar_nonce = 0
 
-pending_count = ttl_cache(f"pend_{current_user}", 4, lambda: len(get_incoming_requests(current_user)))
-unread_count = ttl_cache(f"unread_{current_user}", 4, lambda: count_unread(current_user))
+pending_count, unread_count, alert_n = ttl_cache(f"side_{current_user}", 4, lambda: sidebar_counts(current_user))
 
-alert_n = ttl_cache(f"alerts_{current_user}", 4, lambda: alert_count(current_user))
 admin_mode = is_admin(current_user)
 open_reports = ttl_cache("open_reports", 10, lambda: run("SELECT COUNT(*) FROM reports", fetch="one")[0]) if admin_mode else 0
 
@@ -2121,7 +2186,7 @@ with st.sidebar:
         st.text_input("New password again", type="password", key="pw_new2")
         st.button("Change password", key="pw_btn", on_click=cb_change_password)
         st.divider()
-        mine_blocked = [r[0] for r in run("SELECT blocked FROM blocks WHERE blocker = ? ORDER BY created_at DESC", (current_user,), "all")]
+        mine_blocked = sorted(block_sets(current_user)[0])
         st.caption(f"Blocked people ({len(mine_blocked)})")
         for u in mine_blocked:
             c1, c2 = st.columns([3, 2])
@@ -2146,7 +2211,8 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v40")
+    st.caption("Design v43")
+    perf_slot = st.empty() if admin_mode else None
 
 # ------------------------------------------
 # Shared by the Feed and For You pages
@@ -2678,9 +2744,11 @@ elif st.session_state.page == "profile":
         if bio:
             st.markdown(f'<div style="white-space: pre-wrap; margin: 6px 0 10px;">{html.escape(bio)}</div>', unsafe_allow_html=True)
 
-        n_posts = run("SELECT COUNT(*) FROM posts WHERE author_username = ?", (target,), "one")[0]
+        their_posts = run("SELECT id, note, created_at FROM posts WHERE author_username = ? ORDER BY created_at DESC", (target,), "all")
+        followers_list, following_list = get_followers(target), get_following(target)
+        n_posts = len(their_posts)
         n_friends = len(get_friends(target))
-        n_followers, n_following = follower_count(target), following_count(target)
+        n_followers, n_following = len(followers_list), len(following_list)
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Posts", n_posts)
         m2.metric("Followers", n_followers)
@@ -2701,7 +2769,7 @@ elif st.session_state.page == "profile":
                 st.button("🚩 Report this person", key="prof_report", on_click=cb_report_user, args=(current_user, target))
 
         with st.expander(f"Followers ({n_followers})"):
-            people = get_followers(target)
+            people = followers_list
             if not people:
                 st.caption("No followers yet.")
             for u in people:
@@ -2709,7 +2777,7 @@ elif st.session_state.page == "profile":
                 c1.markdown(person_html(u), unsafe_allow_html=True)
                 c2.button("👤 Profile", key=f"pf_fol_{u}", on_click=cb_view_profile, args=(u,))
         with st.expander(f"Following ({n_following})"):
-            people = get_following(target)
+            people = following_list
             if not people:
                 st.caption("Not following anyone yet.")
             for u in people:
@@ -2720,21 +2788,20 @@ elif st.session_state.page == "profile":
         profile_tabs = st.tabs(["Posts", "Reels"] + (["🔖 Saved"] if target == current_user else []))
         tab_posts, tab_reels = profile_tabs[0], profile_tabs[1]
         with tab_posts:
-            their_posts = run("SELECT id, note, created_at FROM posts WHERE author_username = ? ORDER BY created_at DESC",
-                              (target,), "all")
             if not their_posts:
                 st.caption("No posts yet.")
-            load_likes([p[0] for p in their_posts], current_user)
+            their_media, _unused = fetch_post_extras([p[0] for p in their_posts])
             for p_id, p_note, p_created in their_posts:
                 with st.container(border=True):
                     st.caption(f"🕒 {thai_time(p_created, '%d %b %Y, %H:%M')}")
                     st.markdown(f'<div style="white-space: pre-wrap; margin: 6px 0;">{html.escape(p_note)}</div>', unsafe_allow_html=True)
-                    show_media(run("SELECT file_path, file_type FROM media WHERE post_id = ? ORDER BY \"position\"", (p_id,), "all"),
+                    show_media(their_media.get(p_id, []),
                                can_edit=(target == current_user), key_prefix=f"prof_{p_id}")
                     render_song(st.session_state.get("_songs", {}).get(p_id))
                     post_actions(p_id, target, current_user, "prof", show_profile=False)
         with tab_reels:
-            their_reels = [r for r in get_reels() if r[1] == target][:10]
+            their_reels = run("SELECT id, author_username, video_path, caption, created_at FROM reels "
+                              "WHERE author_username = ? ORDER BY created_at DESC LIMIT 10", (target,), "all")
             if not their_reels:
                 st.caption("No reels yet.")
             for r_id, _, r_path, r_caption, _ in their_reels:
@@ -2859,6 +2926,16 @@ elif st.session_state.page == "admin":
         m3.metric("Reels", n_reels)
         m4.metric("Active today", n_new)
 
+        st.subheader("⏱ Speed check")
+        st.button("Test database speed", key="speed_btn", on_click=cb_speed_test)
+        sr = st.session_state.get("speed_result")
+        if sr:
+            lo, avg, hi = sr
+            st.metric("Database round trip (average)", f"{avg:.0f} ms")
+            st.caption(f"fastest {lo:.0f} ms · slowest {hi:.0f} ms. Under 30 ms is great, 30 to 100 is fine, over 100 ms feels slow, "
+                       "and every page needs many trips.")
+        st.caption(f"Last page: {st.session_state.get('_dbq', 0)} database trips took {st.session_state.get('_dbt', 0):.1f} s.")
+
         reports = run("SELECT id, reporter, reported, reason, created_at FROM reports ORDER BY created_at DESC LIMIT 100", fetch="all")
         times_reported = dict(run("SELECT reported, COUNT(*) FROM reports GROUP BY reported", fetch="all"))
         st.subheader(f"🚩 Reports ({len(reports)})")
@@ -2913,3 +2990,9 @@ elif st.session_state.page == "yuaan":
 
     if st.session_state.get("yuaan_status"):
         st.warning("Real AI is off for the last message. " + st.session_state.yuaan_status)
+
+
+# admin only: how heavy was this page? (this line is filled in last, after the page has been drawn)
+if admin_mode and perf_slot is not None:
+    perf_slot.caption(f"⏱ {st.session_state.get('_dbq', 0)} DB trips · {st.session_state.get('_dbt', 0):.1f}s in DB · "
+                      f"{time.perf_counter() - _script_start:.1f}s total")
