@@ -148,54 +148,47 @@ h1, h2, h3, .yp-banner-title { font-family: 'Bricolage Grotesque', sans-serif !i
 h1, h2, h3 { color: __INK__ !important; }
 hr { border-color: __BORDER__ !important; }
 
-[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child { background: __SURFACE2__ !important; }
-[data-testid="stSidebar"] { border-right: 4px solid __PRIMARY__; }
+[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child { background: __SURFACE__ !important; }
+[data-testid="stSidebar"] { border-right: 1px solid __BORDER__; }
 
-/* very big menu buttons in the sidebar: Feed, Reels, Friends, Chats */
-section[data-testid="stSidebar"][aria-expanded="true"] { width: 360px !important; min-width: 360px !important; }
+/* menu: quiet text rows, the open page is softly highlighted */
 [data-testid="stSidebar"] .stButton > button {
-    min-height: 110px; border-radius: 30px; box-shadow: 0 8px 0 __SHADOW__;
+    min-height: 0; border: none; box-shadow: none; background: transparent; color: __INK__;
+    justify-content: flex-start; padding: 0.55rem 0.9rem; border-radius: 12px; font-weight: 500;
 }
-[data-testid="stSidebar"] .stButton > button p { font-size: 2.2rem !important; font-weight: 800; line-height: 1.15; }
-[data-testid="stSidebar"] .stButton > button:hover { transform: translateY(-3px); }
-/* buttons inside the settings boxes stay normal size */
-[data-testid="stSidebar"] [data-testid="stExpander"] .stButton > button { min-height: 0; border-radius: 999px; box-shadow: none; }
-[data-testid="stSidebar"] [data-testid="stExpander"] .stButton > button p { font-size: 1rem !important; font-weight: 700; }
-[data-testid="stSidebar"] [data-testid="stExpander"] .stButton > button:hover { transform: translateY(-2px); }
+[data-testid="stSidebar"] .stButton > button p { font-size: 1rem !important; font-weight: 500; text-align: left; }
+[data-testid="stSidebar"] .stButton > button:hover { background: __SURFACE2__; color: __INK__; transform: none; }
+[data-testid="stSidebar"] .stButton > button[kind="primary"] { background: __SURFACE2__; color: __PRIMARY__; font-weight: 700; }
+[data-testid="stSidebar"] .stButton > button[kind="primary"] p { font-weight: 700; }
+[data-testid="stSidebar"] [data-testid="stExpander"] .stButton > button { border: 1px solid __BORDER__; justify-content: center; border-radius: 999px; }
 
-/* buttons */
+/* buttons: thin outline, no motion */
 .stButton > button, .stFormSubmitButton > button {
-    border-radius: 999px; border: 2px solid __OUTLINE__; background: __SURFACE__; color: __OUTLINE__;
-    font-weight: 700; padding: 0.35rem 1.1rem; transition: transform .12s ease, background .12s ease, color .12s ease;
+    border-radius: 999px; border: 1px solid __BORDER__; background: transparent; color: __INK__;
+    font-weight: 600; padding: 0.3rem 0.9rem; transition: background .12s ease, color .12s ease;
 }
-.stButton > button:hover, .stFormSubmitButton > button:hover { background: __OUTLINE__; color: __SURFACE__; transform: translateY(-2px); }
-.stButton > button:active, .stFormSubmitButton > button:active { transform: translateY(0); }
-.stButton > button[kind="primary"], .stFormSubmitButton > button {
-    background: linear-gradient(90deg, __BTN1__, __BTN2__); border: none; color: #fff;
-}
-.stButton > button[kind="primary"]:hover, .stFormSubmitButton > button:hover { background: linear-gradient(90deg, __HOV1__, __HOV2__); color: #fff; }
+.stButton > button:hover, .stFormSubmitButton > button:hover { background: __SURFACE2__; color: __INK__; border-color: __BORDER__; }
+.stButton > button[kind="primary"], .stFormSubmitButton > button { background: __BTN1__; border: none; color: #fff; }
+.stButton > button[kind="primary"]:hover, .stFormSubmitButton > button:hover { background: __HOV1__; color: #fff; }
 .stButton > button p, .stFormSubmitButton > button p { color: inherit !important; }
-[data-testid="stFileUploaderDropzone"] button {
-    background: __SURFACE__; border: 2px solid __OUTLINE__; border-radius: 999px;
-}
-[data-testid="stFileUploaderDropzone"] button, [data-testid="stFileUploaderDropzone"] button * { color: __OUTLINE__ !important; }
-[data-testid="stFileUploaderDropzone"] { background: __SURFACE2__; border-radius: 16px; }
+[data-testid="stFileUploaderDropzone"] button { background: transparent; border: 1px solid __BORDER__; border-radius: 999px; }
+[data-testid="stFileUploaderDropzone"] button, [data-testid="stFileUploaderDropzone"] button * { color: __INK__ !important; }
+[data-testid="stFileUploaderDropzone"] { background: __SURFACE2__; border-radius: 14px; }
 
 /* inputs */
 .stTextInput input, .stTextArea textarea, [data-baseweb="select"] > div {
-    background: __SURFACE__ !important; color: __INK__ !important; border-radius: 14px !important; border: 2px solid __BORDER__ !important;
+    background: __SURFACE__ !important; color: __INK__ !important; border-radius: 12px !important; border: 1px solid __BORDER__ !important;
 }
 .stTextInput input:focus, .stTextArea textarea:focus { border-color: __PRIMARY__ !important; }
 
-/* cards */
-[data-testid="stVerticalBlockBorderWrapper"] {
-    background: __SURFACE__; border: 2px solid __BORDER__; border-radius: 22px; box-shadow: 0 8px 0 __SHADOW__;
-}
-[data-testid="stForm"] { background: __SURFACE__; border: 2px dashed __BORDER__; border-radius: 22px; }
-[data-testid="stExpander"] { border: 2px solid __BORDER__; border-radius: 16px; background: __SURFACE2__; }
-[data-testid="stAlert"] { background: __SURFACE2__; border: 2px solid __BORDER__; border-radius: 16px; }
+/* cards: flat, thin line */
+[data-testid="stVerticalBlockBorderWrapper"] { background: __SURFACE__; border: 1px solid __BORDER__; border-radius: 16px; box-shadow: none; }
+[data-testid="stForm"] { background: transparent; border: 1px solid __BORDER__; border-radius: 16px; }
+[data-testid="stExpander"] { border: 1px solid __BORDER__; border-radius: 12px; background: transparent; }
+[data-testid="stAlert"] { background: __SURFACE2__; border: none; border-radius: 12px; }
 [data-testid="stAlert"] * { color: __INK__ !important; }
-video { border-radius: 18px; max-height: 68vh; background: #000; }
+.block-container { padding-top: 2.2rem; }
+video { border-radius: 12px; max-height: 68vh; background: #000; }
 
 /* tabs on the login page */
 button[data-baseweb="tab"] { font-weight: 700; font-size: 1.05rem; }
@@ -205,13 +198,13 @@ button[data-baseweb="tab"][aria-selected="true"], button[data-baseweb="tab"][ari
 /* chat bubbles */
 [data-testid="stChatMessage"] { border-radius: 20px; padding: 0.7rem 1rem; margin-bottom: 0.5rem; background: __SURFACE2__; }
 [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) { background: linear-gradient(90deg, __BUB1__, __BUB2__); }
-[data-testid="stChatInput"] { border-radius: 999px; border: 2px solid __OUTLINE__; background: __SURFACE__; }
+[data-testid="stChatInput"] { border-radius: 999px; border: 1px solid __BORDER__; background: __SURFACE__; }
 [data-testid="stChatInput"] textarea { color: __INK__ !important; }
 
 /* banners at the top of each page */
-.yp-banner { border-radius: 26px; padding: 26px 28px; margin-bottom: 22px; color: #fff; box-shadow: 0 8px 0 rgba(0,0,0,.16); }
-.yp-banner-title { font-size: 2.4rem; font-weight: 800; line-height: 1.05; color: #fff; }
-.yp-banner-sub { font-size: 1.05rem; margin-top: 6px; color: #fff; opacity: .95; }
+.yp-banner { padding: 0 0 6px; margin-bottom: 14px; }
+.yp-banner-title { font-size: 1.7rem; font-weight: 800; line-height: 1.1; color: __INK__; }
+.yp-banner-sub { font-size: .92rem; margin-top: 2px; color: __INK__; opacity: .6; }
 
 /* videos: always shown whole (letterboxed if needed), never taller than the screen */
 [data-testid="stVideo"] video { width: 100%; max-height: 75vh; object-fit: contain; background: #000; border-radius: 16px; }
@@ -236,9 +229,8 @@ def build_css(t):
 
 
 def banner(title, subtitle, page_key):
-    c1, c2 = T["banners"][page_key]
     st.markdown(
-        f'<div class="yp-banner" style="background: linear-gradient(120deg, {c1}, {c2});">'
+        f'<div class="yp-banner">'
         f'<div class="yp-banner-title">{html.escape(title)}</div>'
         f'<div class="yp-banner-sub">{html.escape(subtitle)}</div></div>',
         unsafe_allow_html=True)
@@ -372,8 +364,12 @@ def cached_run(sql, params=(), fetch="one"):
     return _cached_query(sql, tuple(params), fetch)
 
 
-@st.cache_resource(show_spinner="Setting up the database...")
-def init_db():
+TABLE_NAMES = ("users", "posts", "media", "comments", "sessions", "friendships", "messages", "reels", "reel_likes", "follows", "ai_messages",
+                 "group_chats", "group_members", "group_messages", "group_reads", "post_likes", "alert_dismissed", "stories", "post_saves", "blocks", "reports")
+
+
+def schema_sql():
+    """Every statement that builds the tables, indexes and security rules (used for setup and for the move tool)."""
     tables = [
         "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL, display_name TEXT NOT NULL, avatar_path TEXT, theme TEXT, bio TEXT, notif_seen_at TEXT, last_seen TEXT)",
         "CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL, song TEXT)",
@@ -404,6 +400,22 @@ def init_db():
         # when each member last opened each group (drives read / unread and "seen by")
         "CREATE TABLE IF NOT EXISTS group_reads (group_id TEXT NOT NULL, username TEXT NOT NULL, last_read_at TEXT NOT NULL, PRIMARY KEY (group_id, username))",
     ]
+    indexes = ("CREATE INDEX IF NOT EXISTS idx_posts_created ON posts (created_at)",
+                "CREATE INDEX IF NOT EXISTS idx_media_post ON media (post_id)",
+                "CREATE INDEX IF NOT EXISTS idx_comments_post ON comments (post_id)",
+                "CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages (sender, receiver)",
+                "CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages (receiver, is_read)",
+                "CREATE INDEX IF NOT EXISTS idx_post_likes_post ON post_likes (post_id)",
+                "CREATE INDEX IF NOT EXISTS idx_stories_created ON stories (created_at)",
+                "CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members (username)",
+                "CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages (group_id, created_at)")
+    security = [f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY" for name in TABLE_NAMES]
+    return tables, indexes, security
+
+
+@st.cache_resource(show_spinner="Setting up the database...")
+def init_db():
+    tables, indexes, security = schema_sql()
     for sql in tables:
         run(sql)
     # columns added later (older databases don't have them yet)
@@ -416,21 +428,12 @@ def init_db():
         except Exception:
             pass
     # keeps pages quick
-    for sql in ("CREATE INDEX IF NOT EXISTS idx_posts_created ON posts (created_at)",
-                "CREATE INDEX IF NOT EXISTS idx_media_post ON media (post_id)",
-                "CREATE INDEX IF NOT EXISTS idx_comments_post ON comments (post_id)",
-                "CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages (sender, receiver)",
-                "CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages (receiver, is_read)",
-                "CREATE INDEX IF NOT EXISTS idx_post_likes_post ON post_likes (post_id)",
-                "CREATE INDEX IF NOT EXISTS idx_stories_created ON stories (created_at)",
-                "CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members (username)",
-                "CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages (group_id, created_at)"):
+    for sql in indexes:
         run(sql)
     # Supabase also exposes tables through a public web API. Turning row security on (with no rules)
     # shuts that door; this app talks to the database directly, so it is not affected.
-    for name in ("users", "posts", "media", "comments", "sessions", "friendships", "messages", "reels", "reel_likes", "follows", "ai_messages",
-                 "group_chats", "group_members", "group_messages", "group_reads", "post_likes", "alert_dismissed", "stories", "post_saves", "blocks", "reports"):
-        run(f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY")
+    for sql in security:
+        run(sql)
     return True
 
 
@@ -679,38 +682,37 @@ def cb_story_delete(story_id, me):
 
 
 def add_story_ui(me):
-    with st.expander("➕ Add to your story (disappears after 24 hours)"):
-        with st.form("story_form", clear_on_submit=True):
-            sfile = st.file_uploader("Photo or video", type=["png", "jpg", "jpeg", "mp4", "mov"], key="story_file")
-            scaption = st.text_input("Caption (optional)", max_chars=120)
-            if st.form_submit_button("Share to story"):
-                if not sfile:
-                    st.warning("Choose a photo or video first.")
-                else:
-                    ext = os.path.splitext(sfile.name)[1].lower()
-                    try:
-                        if "video" in (sfile.type or "") or ext in (".mp4", ".mov"):
-                            if sfile.size > MAX_VIDEO_MB * 1024 * 1024:
-                                st.error(f"That video is bigger than {MAX_VIDEO_MB} MB.")
-                                return
-                            mime = "video/quicktime" if ext == ".mov" else (sfile.type or "video/mp4")
-                            key = upload_file(sfile.getvalue(), "stories", ext or ".mp4", mime)
-                        else:
-                            mime = "image/jpeg"
-                            key = upload_file(prepare_photo(sfile.getvalue()), "stories", ".jpg", mime)
-                        run("INSERT INTO stories (id, author_username, file_path, file_type, caption, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                            (str(uuid.uuid4()), me, key, mime, scaption.strip(), utc_now().isoformat()))
-                        # tidy up my own stories that have expired (their files too)
-                        for sid, fp in run("SELECT id, file_path FROM stories WHERE author_username = ? AND created_at <= ?",
-                                           (me, story_cutoff()), "all"):
-                            run("DELETE FROM stories WHERE id = ?", (sid,))
-                            try:
-                                delete_file(fp)
-                            except Exception:
-                                pass
-                        st.rerun()
-                    except (RuntimeError, requests.RequestException):
-                        st.error("The story couldn't be uploaded. Please try again.")
+    with st.form("story_form", clear_on_submit=True):
+        sfile = st.file_uploader("Photo or video", type=["png", "jpg", "jpeg", "mp4", "mov"], key="story_file")
+        scaption = st.text_input("Caption (optional)", max_chars=120)
+        if st.form_submit_button("Share to story"):
+            if not sfile:
+                st.warning("Choose a photo or video first.")
+            else:
+                ext = os.path.splitext(sfile.name)[1].lower()
+                try:
+                    if "video" in (sfile.type or "") or ext in (".mp4", ".mov"):
+                        if sfile.size > MAX_VIDEO_MB * 1024 * 1024:
+                            st.error(f"That video is bigger than {MAX_VIDEO_MB} MB.")
+                            return
+                        mime = "video/quicktime" if ext == ".mov" else (sfile.type or "video/mp4")
+                        key = upload_file(sfile.getvalue(), "stories", ext or ".mp4", mime)
+                    else:
+                        mime = "image/jpeg"
+                        key = upload_file(prepare_photo(sfile.getvalue()), "stories", ".jpg", mime)
+                    run("INSERT INTO stories (id, author_username, file_path, file_type, caption, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (str(uuid.uuid4()), me, key, mime, scaption.strip(), utc_now().isoformat()))
+                    # tidy up my own stories that have expired (their files too)
+                    for sid, fp in run("SELECT id, file_path FROM stories WHERE author_username = ? AND created_at <= ?",
+                                       (me, story_cutoff()), "all"):
+                        run("DELETE FROM stories WHERE id = ?", (sid,))
+                        try:
+                            delete_file(fp)
+                        except Exception:
+                            pass
+                    st.rerun()
+                except (RuntimeError, requests.RequestException):
+                    st.error("The story couldn't be uploaded. Please try again.")
 
 
 def stories_strip(me, circle):
@@ -969,6 +971,112 @@ def cb_speed_test():
         _execute("SELECT 1", (), "one")
         times.append((time.perf_counter() - t0) * 1000)
     st.session_state["speed_result"] = (min(times), sum(times) / len(times), max(times))
+    try:  # where the app's own computer is: the database should be in the same part of the world
+        info = requests.get("https://ipinfo.io/json", timeout=4).json()
+        st.session_state["server_place"] = ", ".join(x for x in (info.get("city"), info.get("region"), info.get("country")) if x)
+    except Exception:
+        st.session_state["server_place"] = ""
+
+
+def _new_db_settings():
+    """The new project's details, from Secrets (NEW_DB_URL, NEW_SUPABASE_URL, NEW_SUPABASE_KEY)."""
+    url = get_secret("NEW_DB_URL")
+    sb_url = (get_secret("NEW_SUPABASE_URL") or "").strip().rstrip("/")
+    sb_key = (get_secret("NEW_SUPABASE_KEY") or "").strip()
+    return url, sb_url, sb_key
+
+
+def _headers_for(key, content_type=None):
+    h = {"apikey": key}
+    if key.startswith("eyJ"):
+        h["Authorization"] = f"Bearer {key}"
+    if content_type:
+        h["Content-Type"] = content_type
+    return h
+
+
+def move_copy_tables(new_url):
+    """Builds the tables in the new database and copies every row across. Safe to repeat: rows already there are skipped."""
+    from psycopg2.extras import execute_values
+    old = psycopg2.connect(_fix_dsn(DB_URL), connect_timeout=15)
+    new = psycopg2.connect(_fix_dsn(new_url), connect_timeout=15)
+    new.autocommit = True
+    report = []
+    try:
+        tables, indexes, security = schema_sql()
+        with new.cursor() as cur:
+            for sql in tables:
+                cur.execute(sql.replace("?", "%s"))
+            for sql in indexes:
+                cur.execute(sql)
+            for sql in security:
+                cur.execute(sql)
+        for name in TABLE_NAMES:
+            with old.cursor() as oc:
+                oc.execute(f"SELECT * FROM {name}")
+                cols = [d[0] for d in oc.description]
+                rows = oc.fetchall()
+            if rows:
+                col_sql = ", ".join(f'"{c}"' for c in cols)
+                with new.cursor() as cur:
+                    for i in range(0, len(rows), 500):
+                        execute_values(cur, f"INSERT INTO {name} ({col_sql}) VALUES %s ON CONFLICT DO NOTHING", rows[i:i + 500])
+            with new.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) FROM {name}")
+                n_new = cur.fetchone()[0]
+            report.append((name, len(rows), n_new))
+        times = []
+        with new.cursor() as cur:
+            for _ in range(5):
+                t0 = time.perf_counter()
+                cur.execute("SELECT 1")
+                cur.fetchone()
+                times.append((time.perf_counter() - t0) * 1000)
+        return report, sum(times) / len(times)
+    finally:
+        old.close()
+        new.close()
+
+
+def move_file_keys():
+    """Every file the app has saved in the bucket (found through the database)."""
+    keys = set()
+    for sql in ("SELECT file_path FROM media", "SELECT video_path FROM reels", "SELECT file_path FROM stories",
+                "SELECT avatar_path FROM users WHERE avatar_path IS NOT NULL"):
+        keys.update(r[0] for r in run(sql, (), "all") if r[0])
+    return sorted(keys)
+
+
+def move_copy_files(sb_url, sb_key, budget_seconds=40):
+    """Copies files from the old bucket to the new one for up to budget_seconds. Returns (copied, already_there, failed, left)."""
+    requests.post(f"{sb_url}/storage/v1/bucket", headers=_headers_for(sb_key, "application/json"),
+                  json={"id": BUCKET, "name": BUCKET, "public": True}, timeout=30)   # fine if it already exists
+    keys = move_file_keys()
+    copied = skipped = failed = 0
+    started = time.time()
+    left = 0
+    for i, key in enumerate(keys):
+        if time.time() - started > budget_seconds:
+            left = len(keys) - i
+            break
+        try:
+            if requests.head(f"{sb_url}/storage/v1/object/public/{BUCKET}/{key}", timeout=20).status_code == 200:
+                skipped += 1
+                continue
+            got = requests.get(file_url(key), timeout=120)
+            if got.status_code != 200:
+                failed += 1
+                continue
+            ctype = got.headers.get("Content-Type", "application/octet-stream")
+            put = requests.post(f"{sb_url}/storage/v1/object/{BUCKET}/{key}", headers={**_headers_for(sb_key, ctype), "x-upsert": "true"},
+                                data=got.content, timeout=180)
+            if put.status_code in (200, 201):
+                copied += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    return copied, skipped, failed, left
 
 
 def cb_resolve_report(report_id, me):
@@ -1279,15 +1387,15 @@ def cb_toggle_post_like(post_id, me):
 
 
 def post_actions(post_id, author, me, prefix, show_profile=True):
-    """Like, save and share; then Profile and (on your own posts) Delete."""
+    """One quiet row: like, save, share, and a ⋯ menu (add friend, follow, profile, delete)."""
     count, mine = st.session_state.get("_likes", {}).get(post_id, (0, False))
     is_saved = post_id in st.session_state.get("_saved", set())
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     c1.button(f"{'❤️' if mine else '🤍'} {count}", key=f"{prefix}_like_{post_id}", on_click=cb_toggle_post_like,
               args=(post_id, me), use_container_width=True)
-    c2.button("🔖 Saved" if is_saved else "🔖 Save", key=f"{prefix}_save_{post_id}", on_click=cb_toggle_save,
-              args=(post_id, me), use_container_width=True, type="primary" if is_saved else "secondary")
-    with c3.popover("📤 Share", use_container_width=True):
+    c2.button("🔖" if is_saved else "🏷️", key=f"{prefix}_save_{post_id}", on_click=cb_toggle_save,
+              args=(post_id, me), use_container_width=True, help="Unsave" if is_saved else "Save")
+    with c3.popover("↗", use_container_width=True):
         targets = st.session_state.get("_share_targets", [])
         if not targets:
             st.caption("Add a friend first, then you can share posts with them.")
@@ -1295,12 +1403,14 @@ def post_actions(post_id, author, me, prefix, show_profile=True):
             st.selectbox("Send to", [t[0] for t in targets], format_func=dict(targets).get,
                          key=f"{prefix}_shto_{post_id}")
             st.button("Send", key=f"{prefix}_shsend_{post_id}", on_click=cb_share_post, args=(post_id, prefix, me))
-    if show_profile or author == me:
-        d1, d2 = st.columns(2)
+    with c4.popover("⋯", use_container_width=True):
+        if author != me:
+            friend_button(st, me, author, f"{prefix}_friend_{post_id}")
+            follow_button(st, me, author, f"{prefix}_follow_{post_id}")
         if show_profile:
-            d1.button("👤 Profile", key=f"{prefix}_prof_{post_id}", on_click=cb_view_profile, args=(author,), use_container_width=True)
+            st.button("👤 Profile", key=f"{prefix}_prof_{post_id}", on_click=cb_view_profile, args=(author,), use_container_width=True)
         if author == me:
-            d2.button("🗑️ Delete", key=f"{prefix}_del_{post_id}", on_click=cb_delete_post, args=(post_id, me), use_container_width=True)
+            st.button("🗑️ Delete", key=f"{prefix}_del_{post_id}", on_click=cb_delete_post, args=(post_id, me), use_container_width=True)
 
 
 def cb_change_password():
@@ -1633,26 +1743,31 @@ def cb_toggle_like(reel_id, me):
 
 
 REELS_CSS = """<style>
-/* Reels: swipe up and down; each reel snaps into place, with its buttons down the right-hand side */
-[data-testid="stMain"], section.main { scroll-snap-type: y proximity; }
+/* Reels page: the whole screen, one reel at a time, swipe up and down */
+[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"], [data-testid="collapsedControl"], [data-testid="stHeader"] { display: none !important; }
+.block-container, [data-testid="stMainBlockContainer"] { padding: 0 !important; max-width: 100% !important; }
+[data-testid="stMain"], section.main { scroll-snap-type: y mandatory; overscroll-behavior: contain; }
 [class*="st-key-rlcard_"] {
-    position: relative; height: 80vh; height: min(80dvh, 780px); min-height: 460px;
-    background: #000; border-radius: 18px; overflow: hidden; margin: 0 0 14px 0;
-    scroll-snap-align: start; scroll-margin-top: 10px;
+    position: relative; height: 100vh; height: 100dvh; width: 100%; background: #000; border-radius: 0; overflow: hidden; margin: 0;
+    scroll-snap-align: start; scroll-snap-stop: always;
 }
 [class*="st-key-rlcard_"] [data-testid="stElementContainer"]:has(video) { position: absolute; inset: 0; z-index: 1; }
 [class*="st-key-rlcard_"] [data-testid="stVideo"], [class*="st-key-rlcard_"] video {
-    width: 100% !important; height: 100% !important; object-fit: contain; background: #000; }
-[class*="st-key-rlinfo_"] { position: absolute; left: 12px; right: 84px; bottom: 58px; z-index: 5; pointer-events: none; gap: 4px; }
+    width: 100% !important; height: 100% !important; max-height: none !important; object-fit: cover !important; background: #000; border-radius: 0 !important; }
+[class*="st-key-rlinfo_"] { position: absolute; left: 14px; right: 88px; bottom: calc(26px + env(safe-area-inset-bottom)); z-index: 5; pointer-events: none; gap: 4px; }
 [class*="st-key-rlinfo_"], [class*="st-key-rlinfo_"] * { color: #fff !important; text-shadow: 0 1px 4px rgba(0,0,0,0.7); }
 [class*="st-key-rlinfo_"] p { margin: 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-[class*="st-key-rlrail_"] { position: absolute; right: 6px; bottom: 64px; width: 62px; z-index: 6; gap: 4px; align-items: stretch; }
+[class*="st-key-rlrail_"] { position: absolute; right: 8px; bottom: calc(30px + env(safe-area-inset-bottom)); width: 62px; z-index: 6; gap: 4px; align-items: stretch; }
 [class*="st-key-rlrail_"] > * { width: 100% !important; }
-[class*="st-key-rlrail_"] button {
+[class*="st-key-rlrail_"] button, .st-key-rltop button {
     background: rgba(0,0,0,0.38) !important; color: #fff !important; border: none !important; border-radius: 26px !important;
     min-height: 44px; padding: 2px 4px !important; width: 100% !important; backdrop-filter: blur(6px); box-shadow: none !important; }
-[class*="st-key-rlrail_"] button p, [class*="st-key-rlrail_"] button span { color: #fff !important; font-size: 14px !important; margin: 0; line-height: 1.1; }
+[class*="st-key-rlrail_"] button p, [class*="st-key-rlrail_"] button span, .st-key-rltop button p { color: #fff !important; font-size: 15px !important; margin: 0; line-height: 1.1; }
 [class*="st-key-rlrail_"] [data-testid="stIconMaterial"], [class*="st-key-rlrail_"] button svg { display: none !important; }
+/* back arrow and upload, floating at the top */
+.st-key-rltop { position: fixed; top: calc(10px + env(safe-area-inset-top)); left: 10px; right: 10px; z-index: 100; display: flex; flex-direction: row; justify-content: space-between; align-items: center; gap: 8px; pointer-events: none; }
+.st-key-rltop > * { pointer-events: auto; width: 52px !important; flex: 0 0 auto; }
+.st-key-rlend { height: 40vh; display: flex; align-items: center; justify-content: center; }
 </style>"""
 
 REELS_JS = """<script>
@@ -1673,10 +1788,18 @@ REELS_JS = """<script>
   function setup() {
     pdoc.querySelectorAll('[class*="st-key-rlcard_"] video').forEach(function (v) {
       if (v.__reelsToken === token) return;
-      v.__reelsToken = token; v.loop = true; v.setAttribute('playsinline', ''); v.preload = 'metadata'; io.observe(v);
+      v.__reelsToken = token; v.loop = true; v.controls = false; v.setAttribute('playsinline', ''); v.preload = 'metadata'; io.observe(v);
+      v.addEventListener('click', function () {
+        if (v.muted) { v.muted = false; if (v.paused) play(v); }
+        else if (v.paused) { v.play(); } else { v.pause(); }
+      });
     });
   }
   setup();
+  // first touch anywhere: if the phone started a video silent, give it sound
+  function unmute() { pdoc.querySelectorAll('[class*="st-key-rlcard_"] video').forEach(function (v) { if (!v.paused) v.muted = false; }); }
+  pdoc.addEventListener('touchend', unmute, { once: true, passive: true });
+  pdoc.addEventListener('click', unmute, { once: true });
   var timer = null;
   new pwin.MutationObserver(function () { clearTimeout(timer); timer = setTimeout(setup, 150); })
     .observe(pdoc.body, { childList: true, subtree: true });
@@ -2134,17 +2257,17 @@ PAGE_LABELS = {
     "feed": "🏠 Feed",
     "foryou": "✨ For You",
     "search": "🔍 Search",
-    "alerts": "🔔 Alerts" + (f" ({alert_n} new)" if alert_n else ""),
+    "alerts": "🔔 Alerts" + (f"  ·  {alert_n}" if alert_n else ""),
     "reels": "🎬 Reels",
-    "friends": "👥 Friends" + (f" ({pending_count} new)" if pending_count else ""),
-    "chats": "💬 Chats" + (f" ({unread_count} new)" if unread_count else ""),
+    "friends": "👥 Friends" + (f"  ·  {pending_count}" if pending_count else ""),
+    "chats": "💬 Chats" + (f"  ·  {unread_count}" if unread_count else ""),
     "yuaan": "🤖 Yuaan",
 }
 if admin_mode:
-    PAGE_LABELS["admin"] = "🛡 Admin" + (f" ({open_reports} reports)" if open_reports else "")
+    PAGE_LABELS["admin"] = "🛡 Admin" + (f"  ·  {open_reports}" if open_reports else "")
 
 with st.sidebar:
-    st.markdown(person_html(current_user, size=56, subtitle="Welcome to Yuaan Post"), unsafe_allow_html=True)
+    st.markdown(person_html(current_user, size=44, subtitle=f"@{html.escape(current_user)}"), unsafe_allow_html=True)
     st.write("")
     for page_key, page_label in PAGE_LABELS.items():
         st.button(page_label, key=f"nav_{page_key}", use_container_width=True,
@@ -2211,7 +2334,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v43")
+    st.caption("Design v46")
     perf_slot = st.empty() if admin_mode else None
 
 # ------------------------------------------
@@ -2238,12 +2361,7 @@ def render_post_card(idx, post, media_rows, comments, prefix, reason=None):
     post_id, note, created_at, author_username = post[:4]
     time_str = thai_time(created_at, "%d %b %Y, %H:%M")
     with st.container(border=True):
-        st.markdown(f'<div style="height:8px;border-radius:8px;background:{T["accents"][idx % len(T["accents"])]};margin-bottom:12px;"></div>',
-                    unsafe_allow_html=True)
-        h_left, h_right, h_right2 = st.columns([4, 2, 2])
-        h_left.markdown(person_html(author_username, size=48, subtitle=f"🕒 {time_str}"), unsafe_allow_html=True)
-        friend_button(h_right, current_user, author_username, f"{prefix}_friend_{post_id}")
-        follow_button(h_right2, current_user, author_username, f"{prefix}_follow_{post_id}")
+        st.markdown(person_html(author_username, size=40, subtitle=time_str), unsafe_allow_html=True)
         if reason:
             st.caption(f"✨ {reason}")
         st.markdown(f'<div style="white-space: pre-wrap; margin: 10px 0;">{html.escape(note)}</div>', unsafe_allow_html=True)
@@ -2253,7 +2371,7 @@ def render_post_card(idx, post, media_rows, comments, prefix, reason=None):
 
         post_actions(post_id, author_username, current_user, prefix)
 
-        with st.expander(f"💬 comment ({len(comments)} comment)"):
+        with st.expander(f"💬 {len(comments)}" if comments else "💬 Comment"):
             for c_author, c_text in comments:
                 st.markdown(f"**{c_author or 'Unknown'}**: {c_text}")
 
@@ -2392,79 +2510,81 @@ incoming_call_watcher(current_user)
 # PAGE: Feed
 # ------------------------------------------
 if st.session_state.page == "feed":
-    banner("Yuaan Post", "See what your friends are up to, or post something new.", "feed")
+    banner("Yuaan Post", "What your friends are up to.", "feed")
 
     story_circle = set(get_friends(current_user)) | set(get_following(current_user))
     story_viewer(current_user)
     stories_strip(current_user, story_circle)
-    add_story_ui(current_user)
 
-    chosen = parse_song(st.session_state.get("post_song"))
-    with st.expander("🎵 Add a song to your post" + (" ✅" if chosen else "")):
-        if chosen:
-            render_song(st.session_state.post_song)
-            st.button("✖ Remove song", key="song_remove_btn", on_click=cb_song_remove)
-        st.text_input("Search a song or artist", key="song_q", placeholder="e.g. Blinding Lights")
-        st.button("🔍 Search", key="song_search_btn", on_click=cb_song_search)
-        results = st.session_state.get("song_results", [])
-        if st.session_state.get("song_searched") and not results:
-            st.caption("No songs found (or search isn't reachable right now). You can paste a link below instead.")
-        for i, sg in enumerate(results):
-            c1, c2, c3 = st.columns([1, 4, 2])
-            if sg.get("art"):
-                c1.image(sg["art"], width=48)
-            c2.markdown(f"**{html.escape(sg['title'])}**  \n{html.escape(sg['artist'])}", unsafe_allow_html=True)
-            c3.button("Choose", key=f"song_pick_{i}", on_click=cb_song_pick, args=(i,))
-        st.caption("Search plays a 30-second preview. Or paste a Spotify or YouTube link:")
-        st.text_input("Spotify or YouTube link", key="song_link", placeholder="https://open.spotify.com/track/...")
-        st.button("Use link", key="song_link_btn", on_click=cb_song_link)
+    with st.expander("＋ Create"):
+        tab_post, tab_story = st.tabs(["Post", "Story"])
+        with tab_story:
+            st.caption("Disappears after 24 hours.")
+            add_story_ui(current_user)
+        with tab_post:
+            chosen = parse_song(st.session_state.get("post_song"))
+            with st.popover("🎵 Song ✅" if chosen else "🎵 Song"):
+                if chosen:
+                    render_song(st.session_state.post_song)
+                    st.button("Remove song", key="song_remove_btn", on_click=cb_song_remove)
+                st.text_input("Search a song or artist", key="song_q", placeholder="e.g. Blinding Lights")
+                st.button("Search", key="song_search_btn", on_click=cb_song_search)
+                results = st.session_state.get("song_results", [])
+                if st.session_state.get("song_searched") and not results:
+                    st.caption("No songs found. You can paste a link below instead.")
+                for i, sg in enumerate(results):
+                    c1, c2, c3 = st.columns([1, 4, 2])
+                    if sg.get("art"):
+                        c1.image(sg["art"], width=48)
+                    c2.markdown(f"**{html.escape(sg['title'])}**  \n{html.escape(sg['artist'])}", unsafe_allow_html=True)
+                    c3.button("Choose", key=f"song_pick_{i}", on_click=cb_song_pick, args=(i,))
+                st.text_input("Or paste a Spotify / YouTube link", key="song_link", placeholder="https://open.spotify.com/track/...")
+                st.button("Use link", key="song_link_btn", on_click=cb_song_link)
 
-    with st.form("diary_form", clear_on_submit=True):
-        note = st.text_area("Your description...")
-        with st.expander("📁 click to select photos or videos"):
-            uploaded_files = st.file_uploader("select your file", type=["png", "jpg", "jpeg", "mp4", "mov"], accept_multiple_files=True)
-        submit_button = st.form_submit_button("Post!")
+            with st.form("diary_form", clear_on_submit=True, border=False):
+                note = st.text_area("What's on your mind?", label_visibility="collapsed", placeholder="What's on your mind?")
+                uploaded_files = st.file_uploader("Photos or videos", type=["png", "jpg", "jpeg", "mp4", "mov"], accept_multiple_files=True)
+                submit_button = st.form_submit_button("Post")
 
-        if submit_button:
-            if note:
-                post_id = str(uuid.uuid4())
-                created_at = utc_now().isoformat()
-                saved_files = []  # (key, mime type)
-                problem = None
-                with st.spinner("Posting..."):
-                    try:
-                        for file in (uploaded_files or []):
-                            ext = os.path.splitext(file.name)[1].lower()
-                            if "video" in (file.type or "") or ext in (".mp4", ".mov"):
-                                if file.size > MAX_VIDEO_MB * 1024 * 1024:
-                                    problem = f"A video is bigger than {MAX_VIDEO_MB} MB. Choose a shorter one."
-                                    break
-                                mime = "video/quicktime" if ext == ".mov" else (file.type or "video/mp4")
-                                saved_files.append((upload_file(file.getvalue(), "posts", ext or ".mp4", mime), mime))
-                            else:
-                                saved_files.append((upload_file(prepare_photo(file.getvalue()), "posts", ".jpg", "image/jpeg"), "image/jpeg"))
-                    except Exception:
-                        problem = "A file couldn't be uploaded. Please try again."
-                if problem:
-                    for key, _ in saved_files:  # don't leave half a post behind
-                        delete_file(key)
-                    st.error(problem)
+            if submit_button:
+                if note:
+                    post_id = str(uuid.uuid4())
+                    created_at = utc_now().isoformat()
+                    saved_files = []  # (key, mime type)
+                    problem = None
+                    with st.spinner("Posting..."):
+                        try:
+                            for file in (uploaded_files or []):
+                                ext = os.path.splitext(file.name)[1].lower()
+                                if "video" in (file.type or "") or ext in (".mp4", ".mov"):
+                                    if file.size > MAX_VIDEO_MB * 1024 * 1024:
+                                        problem = f"A video is bigger than {MAX_VIDEO_MB} MB. Choose a shorter one."
+                                        break
+                                    mime = "video/quicktime" if ext == ".mov" else (file.type or "video/mp4")
+                                    saved_files.append((upload_file(file.getvalue(), "posts", ext or ".mp4", mime), mime))
+                                else:
+                                    saved_files.append((upload_file(prepare_photo(file.getvalue()), "posts", ".jpg", "image/jpeg"), "image/jpeg"))
+                        except Exception:
+                            problem = "A file couldn't be uploaded. Please try again."
+                    if problem:
+                        for key, _ in saved_files:  # don't leave half a post behind
+                            delete_file(key)
+                        st.error(problem)
+                    else:
+                        song_value = st.session_state.get("post_song") if parse_song(st.session_state.get("post_song")) else None
+                        run("INSERT INTO posts (id, author_username, note, created_at, song) VALUES (?, ?, ?, ?, ?)",
+                            (post_id, current_user, note, created_at, song_value))
+                        for k in ("post_song", "song_results", "song_searched"):
+                            st.session_state.pop(k, None)
+                        for position, (key, mime) in enumerate(saved_files):
+                            run('INSERT INTO media (id, post_id, file_path, file_type, "position") VALUES (?, ?, ?, ?, ?)',
+                                (str(uuid.uuid4()), post_id, key, mime, position))
+                        st.success("success! 🎉")
+                        st.rerun()
                 else:
-                    song_value = st.session_state.get("post_song") if parse_song(st.session_state.get("post_song")) else None
-                    run("INSERT INTO posts (id, author_username, note, created_at, song) VALUES (?, ?, ?, ?, ?)",
-                        (post_id, current_user, note, created_at, song_value))
-                    for k in ("post_song", "song_results", "song_searched"):
-                        st.session_state.pop(k, None)
-                    for position, (key, mime) in enumerate(saved_files):
-                        run('INSERT INTO media (id, post_id, file_path, file_type, "position") VALUES (?, ?, ?, ?, ?)',
-                            (str(uuid.uuid4()), post_id, key, mime, position))
-                    st.success("success! 🎉")
-                    st.rerun()
-            else:
-                st.warning("Add a description(can be anything)!")
+                    st.warning("Add a description(can be anything)!")
 
     st.write("")
-    st.header("Latest posts")
 
     hidden = blocked_set(current_user)
     posts = [p for p in run("SELECT id, note, created_at, author_username FROM posts ORDER BY created_at DESC LIMIT 60", fetch="all")
@@ -2514,39 +2634,39 @@ elif st.session_state.page == "foryou":
 # PAGE: Reels (short videos, one at a time)
 # ------------------------------------------
 elif st.session_state.page == "reels":
-    banner("Reels", "Swipe up and down to watch. Your buttons are on the right.", "reels")
-
-    with st.expander("➕ Upload a reel"):
-        with st.form("reel_form", clear_on_submit=True):
-            reel_file = st.file_uploader("Video (MP4 works best)", type=["mp4", "mov", "webm"])
-            reel_caption = st.text_input("Caption")
-            if st.form_submit_button("Share reel"):
-                if not reel_file:
-                    st.warning("Choose a video first.")
-                elif reel_file.size > MAX_REEL_MB * 1024 * 1024:
-                    st.error(f"That video is bigger than {MAX_REEL_MB} MB. Choose a shorter one.")
-                else:
-                    reel_id = str(uuid.uuid4())
-                    ext = os.path.splitext(reel_file.name)[1].lower() or ".mp4"
-                    mime = {".mov": "video/quicktime", ".webm": "video/webm"}.get(ext, "video/mp4")
-                    try:
-                        with st.spinner("Uploading your reel..."):
-                            reel_key = upload_file(reel_file.getvalue(), "reels", ext, mime)
-                        run("INSERT INTO reels (id, author_username, video_path, caption, created_at) VALUES (?, ?, ?, ?, ?)",
-                            (reel_id, current_user, reel_key, reel_caption.strip(), utc_now().isoformat()))
-                        st.session_state.reel_idx = 0  # show the new reel first
-                        st.rerun()
-                    except (RuntimeError, requests.RequestException):
-                        st.error("The reel couldn't be uploaded. Please try again.")
+    st.markdown(REELS_CSS, unsafe_allow_html=True)
+    with st.container(key="rltop"):
+        st.button("←", key="rl_back", on_click=cb_go_page, args=("feed",), help="Back")
+        with st.popover("＋"):
+            with st.form("reel_form", clear_on_submit=True):
+                reel_file = st.file_uploader("Video (MP4 works best)", type=["mp4", "mov", "webm"])
+                reel_caption = st.text_input("Caption")
+                if st.form_submit_button("Share reel"):
+                    if not reel_file:
+                        st.warning("Choose a video first.")
+                    elif reel_file.size > MAX_REEL_MB * 1024 * 1024:
+                        st.error(f"That video is bigger than {MAX_REEL_MB} MB. Choose a shorter one.")
+                    else:
+                        reel_id = str(uuid.uuid4())
+                        ext = os.path.splitext(reel_file.name)[1].lower() or ".mp4"
+                        mime = {".mov": "video/quicktime", ".webm": "video/webm"}.get(ext, "video/mp4")
+                        try:
+                            with st.spinner("Uploading your reel..."):
+                                reel_key = upload_file(reel_file.getvalue(), "reels", ext, mime)
+                            run("INSERT INTO reels (id, author_username, video_path, caption, created_at) VALUES (?, ?, ?, ?, ?)",
+                                (reel_id, current_user, reel_key, reel_caption.strip(), utc_now().isoformat()))
+                            st.session_state.reel_idx = 0  # show the new reel first
+                            st.rerun()
+                        except (RuntimeError, requests.RequestException):
+                            st.error("The reel couldn't be uploaded. Please try again.")
 
     hidden = blocked_set(current_user)
     all_reels = [r for r in get_reels() if r[1] not in hidden]
     reel_limit = st.session_state.get("reel_limit", 8)
     reels = all_reels[:reel_limit]
     if not reels:
-        st.info("No reels yet. Upload the first one above.")
+        st.info("No reels yet. Tap ＋ at the top to upload the first one.")
     else:
-        st.markdown(REELS_CSS, unsafe_allow_html=True)
         prefetch_people([r[1] for r in reels])
         reel_likes_map, reel_comments_map, reel_saved = load_reel_extras([r[0] for r in reels], current_user)
         reel_targets = share_targets(current_user)
@@ -2591,7 +2711,8 @@ elif st.session_state.page == "reels":
                         if author == current_user:
                             st.button("🗑️ Delete reel", key=f"rl_del_{reel_id}", on_click=cb_delete_reel, args=(reel_id, current_user))
         if len(all_reels) > reel_limit:
-            st.button("⬇ Load more reels", key="rl_more", on_click=cb_more_reels, use_container_width=True)
+            with st.container(key="rlend"):
+                st.button("⬇ Load more reels", key="rl_more", on_click=cb_more_reels)
         components.html(REELS_JS, height=0)
 
 # ------------------------------------------
@@ -2934,7 +3055,36 @@ elif st.session_state.page == "admin":
             st.metric("Database round trip (average)", f"{avg:.0f} ms")
             st.caption(f"fastest {lo:.0f} ms · slowest {hi:.0f} ms. Under 30 ms is great, 30 to 100 is fine, over 100 ms feels slow, "
                        "and every page needs many trips.")
+        if st.session_state.get("server_place"):
+            st.caption(f"The app's computer is in: {st.session_state['server_place']}. Put the database in the same part of the world.")
         st.caption(f"Last page: {st.session_state.get('_dbq', 0)} database trips took {st.session_state.get('_dbt', 0):.1f} s.")
+
+        st.subheader("🚚 Move to a faster database")
+        new_url, new_sb_url, new_sb_key = _new_db_settings()
+        if not (new_url and new_sb_url and new_sb_key):
+            st.caption("Make a new Supabase project in a region near the app (for example US East), then add three lines to Secrets: "
+                       "NEW_DB_URL (its Session pooler link), NEW_SUPABASE_URL and NEW_SUPABASE_KEY (its Project URL and secret key). "
+                       "Save, reboot, and come back here.")
+        else:
+            st.caption("Copies your people, posts, chats, photos and videos into the new project. Your old one is not changed. "
+                       "You can press this as many times as you like; it only adds what is missing.")
+            if st.button("Copy everything to the new database", key="move_btn"):
+                try:
+                    with st.spinner("Copying your tables..."):
+                        report, new_ms = move_copy_tables(new_url)
+                    st.success(f"Tables copied. The new database answers in about {new_ms:.0f} ms (your current one: see above).")
+                    st.dataframe([{"table": n, "rows in old": a, "rows in new": b} for n, a, b in report], hide_index=True)
+                    with st.spinner("Copying photos and videos (up to 40 seconds each press)..."):
+                        copied, skipped, failed, left = move_copy_files(new_sb_url, new_sb_key)
+                    st.info(f"Files: {copied} copied, {skipped} already there, {failed} failed.")
+                    if left:
+                        st.warning(f"{left} files still to go. Press the button again to continue.")
+                    elif not failed:
+                        st.success("Everything is copied. Now change the three Secrets: SUPABASE_DB_URL, SUPABASE_URL and SUPABASE_KEY "
+                                   "to the new project's values, save, and reboot.")
+                except Exception as e:
+                    st.error(f"Copy stopped: {type(e).__name__}. Check the three NEW_ lines in Secrets (spelling, straight quotes, "
+                             "the Session pooler link with your real password).")
 
         reports = run("SELECT id, reporter, reported, reason, created_at FROM reports ORDER BY created_at DESC LIMIT 100", fetch="all")
         times_reported = dict(run("SELECT reported, COUNT(*) FROM reports GROUP BY reported", fetch="all"))
