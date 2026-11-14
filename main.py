@@ -1047,7 +1047,7 @@ def move_file_keys():
     return sorted(keys)
 
 
-def move_copy_files(sb_url, sb_key, budget_seconds=40):
+def move_copy_files(sb_url, sb_key, budget_seconds=40, src_url=None):
     """Copies files from the old bucket to the new one for up to budget_seconds. Returns (copied, already_there, failed, left)."""
     requests.post(f"{sb_url}/storage/v1/bucket", headers=_headers_for(sb_key, "application/json"),
                   json={"id": BUCKET, "name": BUCKET, "public": True}, timeout=30)   # fine if it already exists
@@ -1063,7 +1063,7 @@ def move_copy_files(sb_url, sb_key, budget_seconds=40):
             if requests.head(f"{sb_url}/storage/v1/object/public/{BUCKET}/{key}", timeout=20).status_code == 200:
                 skipped += 1
                 continue
-            got = requests.get(file_url(key), timeout=120)
+            got = requests.get(f"{src_url}/storage/v1/object/public/{BUCKET}/{key}" if src_url else file_url(key), timeout=120)
             if got.status_code != 200:
                 failed += 1
                 continue
@@ -1748,7 +1748,7 @@ REELS_CSS = """<style>
 .block-container, [data-testid="stMainBlockContainer"] { padding: 0 !important; max-width: 100% !important; }
 [data-testid="stMain"], section.main { scroll-snap-type: y mandatory; overscroll-behavior: contain; }
 [class*="st-key-rlcard_"] {
-    position: relative; height: 100vh; height: 100dvh; width: 100%; background: #000; border-radius: 0; overflow: hidden; margin: 0;
+    position: relative; height: 100vh !important; height: 100dvh !important; min-height: 100vh !important; min-height: 100dvh !important; flex-shrink: 0 !important; width: 100%; background: #000; border-radius: 0; overflow: hidden; margin: 0; gap: 0 !important;
     scroll-snap-align: start; scroll-snap-stop: always;
 }
 [class*="st-key-rlcard_"] [data-testid="stElementContainer"]:has(video) { position: absolute; inset: 0; z-index: 1; }
@@ -2334,7 +2334,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v46")
+    st.caption("Design v48")
     perf_slot = st.empty() if admin_mode else None
 
 # ------------------------------------------
@@ -2675,6 +2675,7 @@ elif st.session_state.page == "reels":
             n_likes, liked = reel_likes_map.get(reel_id, (0, False))
             comments_here = reel_comments_map.get(reel_id, [])
             with st.container(key=f"rlcard_{reel_id}"):
+                st.markdown('<div style="height:100vh;height:100dvh;margin:0;"></div>', unsafe_allow_html=True)   # gives the card its full-screen height
                 st.video(file_url(video_path), loop=True)
                 with st.container(key=f"rlinfo_{reel_id}"):
                     st.markdown(person_html(author, size=34, subtitle=f"🕒 {thai_time(created_at, '%d %b, %H:%M')}"), unsafe_allow_html=True)
@@ -3058,6 +3059,21 @@ elif st.session_state.page == "admin":
         if st.session_state.get("server_place"):
             st.caption(f"The app's computer is in: {st.session_state['server_place']}. Put the database in the same part of the world.")
         st.caption(f"Last page: {st.session_state.get('_dbq', 0)} database trips took {st.session_state.get('_dbt', 0):.1f} s.")
+
+        st.subheader("🖼 Fix missing photos")
+        old_sb = (get_secret("OLD_SUPABASE_URL") or "").strip().rstrip("/")
+        if not old_sb:
+            st.caption("If photos show as broken after moving to a new project, add one line to Secrets: OLD_SUPABASE_URL = the Project URL "
+                       "of your OLD Supabase project (looks like https://abcd.supabase.co). Save, reboot, then press the button here.")
+        else:
+            if st.button("Copy missing photos and videos from the old project", key="fixpics_btn"):
+                with st.spinner("Copying (up to 40 seconds each press)..."):
+                    copied, skipped, failed, left = move_copy_files(SUPABASE_URL, SUPABASE_KEY, src_url=old_sb)
+                st.info(f"{copied} copied, {skipped} were already fine, {failed} could not be found in the old project.")
+                if left:
+                    st.warning(f"{left} files still to go. Press the button again.")
+                else:
+                    st.success("Done. Reload the Feed.")
 
         st.subheader("🚚 Move to a faster database")
         new_url, new_sb_url, new_sb_key = _new_db_settings()
