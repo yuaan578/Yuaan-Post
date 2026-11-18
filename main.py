@@ -1933,7 +1933,7 @@ FEED_VIDEO_LOGIC = r"""
   var prev = W.__ypFeed;
   var unlocked = prev ? !!prev.unlocked : false;
   if (prev) { try { prev.dispose(); } catch (e) {} }
-  var timer = null, watchdog = null;
+  var timer = null, watchdog = null, syncTimer = null;
   var CARD = '[data-testid="stVerticalBlockBorderWrapper"]';
   function inReel(v) { return !!v.closest('[class*="st-key-rlcard_"]'); }
   function loud() { try { return !!(navigator.userActivation && navigator.userActivation.hasBeenActive); } catch (e) { return false; } }
@@ -1949,12 +1949,13 @@ FEED_VIDEO_LOGIC = r"""
     var a = songFor(v);
     if (!a) return;
     a.__ypWant = true;
-    if (a.paused) { var p = a.play(); if (p && p.catch) p.catch(function () { if (!state.unlocked) showPill(); }); }
+    if (a.paused) { var p = a.play(); if (p && p.catch) p.catch(function () { a.__ypBlocked = true; if (!state.unlocked) showPill(); }); }
   }
   function stopSong(v) { var a = songFor(v); if (a) { a.__ypWant = false; if (!a.paused) a.pause(); } }
   function unlock() {
     if (state.unlocked) return;
     state.unlocked = true; hidePill();
+    D.querySelectorAll(CARD + ' audio').forEach(function (a) { a.__ypBlocked = false; });
     D.querySelectorAll('video').forEach(function (v) {
       if (inReel(v)) return;
       if (v.__ypVisible) { v.muted = false; if (!v.paused) startSong(v); }
@@ -2003,7 +2004,7 @@ FEED_VIDEO_LOGIC = r"""
           var p = v.play();
           if (p && p.catch) p.catch(function () { v.muted = true; var q = v.play(); if (q && q.catch) q.catch(function () {}); showPill(); });
           if (v.muted && !state.unlocked) showPill();
-        }
+        } else if (!v.paused) { startSong(v); }   // a refresh of the page can leave the song paused: start it again
       } else {
         v.__ypVisible = false; v.__ypStopped = false;
         if (!v.paused) { v.__ypHalting = true; v.pause(); setTimeout(function () { v.__ypHalting = false; }, 100); }
@@ -2022,8 +2023,18 @@ FEED_VIDEO_LOGIC = r"""
   mo.observe(D.body, { childList: true, subtree: true });
   D.addEventListener('ended', onEnded, true); D.addEventListener('play', onPlay, true); D.addEventListener('pause', onPause, true);
   watchdog = setInterval(function () { if (!D.querySelector('video')) hidePill(); }, 1000);
+  // keeps each song in step with its video, even after the page refreshes itself and re-creates the song player
+  syncTimer = setInterval(function () {
+    D.querySelectorAll('video').forEach(function (v) {
+      if (inReel(v) || !v.__ypBound) return;
+      var a = songFor(v);
+      if (!a) return;
+      if (!v.paused && !v.ended) { if (a.paused && !a.ended && !a.__ypBlocked) startSong(v); }
+      else if (!a.paused) { a.pause(); }
+    });
+  }, 500);
   var state = { unlocked: unlocked, dispose: function () {
-    io.disconnect(); mo.disconnect(); clearTimeout(timer); clearInterval(watchdog);
+    io.disconnect(); mo.disconnect(); clearTimeout(timer); clearInterval(watchdog); clearInterval(syncTimer);
     D.removeEventListener('ended', onEnded, true); D.removeEventListener('play', onPlay, true); D.removeEventListener('pause', onPause, true);
     ['touchend', 'pointerup', 'click', 'keydown'].forEach(function (n) { D.removeEventListener(n, gesture, true); });
     D.querySelectorAll('video').forEach(function (v) { v.__ypBound = false; });
@@ -2592,7 +2603,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v55")
+    st.caption("Design v56")
     perf_slot = st.empty() if admin_mode else None
 
 if st.session_state.page != "reels":
