@@ -11,6 +11,7 @@ import hmac
 import time
 import requests
 import subprocess
+import sys
 import tempfile
 import shutil
 import psycopg2
@@ -1320,11 +1321,28 @@ def parse_song(raw):
 
 
 def _ffmpeg_path():
-    try:
-        import imageio_ffmpeg
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return shutil.which("ffmpeg")
+    """Finds ffmpeg; if the helper library isn't installed yet, installs it once (takes about a minute the first time)."""
+    for attempt in (1, 2):
+        try:
+            import imageio_ffmpeg
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            found = shutil.which("ffmpeg")
+            if found:
+                return found
+            if attempt == 2 or st.session_state.get("_ffmpeg_tried") or os.environ.get("YP_NO_AUTOINSTALL"):
+                return None
+            st.session_state["_ffmpeg_tried"] = True
+            try:
+                subprocess.run([sys.executable, "-m", "pip", "install", "--user", "--quiet", "imageio-ffmpeg"],
+                               capture_output=True, timeout=170)
+                import site
+                import importlib
+                sys.path.append(site.getusersitepackages())
+                importlib.invalidate_caches()
+            except Exception:
+                return None
+    return None
 
 
 def fetch_song_bytes(url):
@@ -1337,12 +1355,15 @@ def fetch_song_bytes(url):
 def mix_song_into_video(video_bytes, song_url):
     """Puts the song into the video's own sound (the video keeps its voices, quieter). Returns mp4 bytes, or None if it couldn't.
     A song inside the video plays wherever the video plays, so it can never be blocked by the browser."""
+    st.session_state["mix_error"] = ""
     ff = _ffmpeg_path()
     if not ff:
+        st.session_state["mix_error"] = "the video tool (ffmpeg) isn't available on the server"
         return None
     try:
         song = fetch_song_bytes(song_url)
         if not song:
+            st.session_state["mix_error"] = "the song file couldn't be downloaded"
             return None
         with tempfile.TemporaryDirectory() as tmp:
             vin, sin, out = (os.path.join(tmp, n) for n in ("in_video", "in_song", "out.mp4"))
@@ -1360,12 +1381,15 @@ def mix_song_into_video(video_bytes, song_url):
             for cmd in attempts:
                 try:
                     done = subprocess.run(cmd, capture_output=True, timeout=150)
-                except Exception:
+                except Exception as e:
+                    st.session_state["mix_error"] = f"ffmpeg did not run ({type(e).__name__})"
                     continue
                 if done.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 1000:
                     return open(out, "rb").read()
+                st.session_state["mix_error"] = "ffmpeg said: " + done.stderr.decode("utf-8", "ignore").strip()[-160:]
         return None
-    except Exception:
+    except Exception as e:
+        st.session_state["mix_error"] = f"{type(e).__name__}"
         return None
 
 
@@ -2659,11 +2683,13 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v57")
+    st.caption("Design v58")
     perf_slot = st.empty() if admin_mode else None
 
 if st.session_state.page != "reels":
     components.html(inject_js(FEED_VIDEO_LOGIC, "yp-feedvideo-js"), height=0)
+if st.session_state.get("flash_warn"):
+    st.warning(st.session_state.pop("flash_warn"))
 
 # ------------------------------------------
 # Shared by the Feed and For You pages
@@ -2910,6 +2936,9 @@ if st.session_state.page == "feed":
                         song_value = st.session_state.get("post_song") if parse_song(st.session_state.get("post_song")) else None
                         if song_value and mixed:
                             song_value = json.dumps({**mix_song, "mixed": True})
+                        elif mix_url and any("video" in t for _, t in saved_files):
+                            st.session_state["flash_warn"] = ("Posted, but the song could not be put inside the video: "
+                                                              + (st.session_state.get("mix_error") or "unknown reason") + ".")
                         run("INSERT INTO posts (id, author_username, note, created_at, song) VALUES (?, ?, ?, ?, ?)",
                             (post_id, current_user, note, created_at, song_value))
                         for k in ("post_song", "song_results", "song_searched"):
@@ -3009,6 +3038,9 @@ elif st.session_state.page == "reels":
                                     if with_song:
                                         data, ext, mime = with_song, ".mp4", "video/mp4"
                                         reel_song_value = json.dumps({**rs, "mixed": True})
+                                    else:
+                                        st.session_state["flash_warn"] = ("Uploaded, but the song could not be put inside the video: "
+                                                                          + (st.session_state.get("mix_error") or "unknown reason") + ".")
                                 reel_key = upload_file(data, "reels", ext, mime)
                             run("INSERT INTO reels (id, author_username, video_path, caption, created_at, song) VALUES (?, ?, ?, ?, ?, ?)",
                                 (reel_id, current_user, reel_key, reel_caption.strip(), utc_now().isoformat(), reel_song_value))
