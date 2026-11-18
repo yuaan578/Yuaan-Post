@@ -1826,6 +1826,7 @@ REELS_LOGIC = r"""
   var audios = prev ? prev.audios : {};
   var unlocked = prev ? prev.unlocked : false;
   if (prev) { try { prev.dispose(); } catch (e) {} }
+  if (W.__ypFeed) { try { W.__ypFeed.dispose(); } catch (e) {} }   // the feed's silent autoplay must not touch reels
   var SONGS = __SONGS__;
   var active = null, timer = null, watchdog = null;
   function loud() { try { return !!(navigator.userActivation && navigator.userActivation.hasBeenActive); } catch (e) { return false; } }
@@ -1860,14 +1861,20 @@ REELS_LOGIC = r"""
       if (active && reelId(active) === id) { var p = a.play(); if (p && p.catch) p.catch(function () {}); }
       else { var q = a.play(); if (q && q.then) q.then(function () { a.pause(); a.currentTime = 0; }).catch(function () {}); }
     });
-    if (active) { active.muted = false; }
+    // this tap also gives every reel video permission to play with sound
+    D.querySelectorAll('[class*="st-key-rlcard_"] video').forEach(function (v) {
+      v.muted = false;
+      if (v === active) { if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function () {}); } }
+      else { var q = v.play(); if (q && q.then) q.then(function () { if (v !== active) v.pause(); }).catch(function () {}); }
+    });
   }
   function play(v) {
     var a = audioFor(v);
     v.muted = !(loud() || state.unlocked);
-    if (a) { v.volume = 0.2; }
+    if (a) { v.volume = 0.2; } else { v.volume = 1; }
     var p = v.play();
-    if (p && p.catch) p.catch(function () { v.muted = true; var q = v.play(); if (q && q.catch) q.catch(function () {}); });
+    if (p && p.catch) p.catch(function () { v.muted = true; var q = v.play(); if (q && q.catch) q.catch(function () {}); showPill(); });
+    if (v.muted && !state.unlocked) showPill();
     if (a) startSong(v);
   }
   function halt(v) { try { v.pause(); } catch (x) {} var a = audioFor(v); if (a) { try { a.pause(); a.currentTime = 0; } catch (x) {} } }
@@ -2533,7 +2540,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v53")
+    st.caption("Design v54")
     perf_slot = st.empty() if admin_mode else None
 
 if st.session_state.page != "reels":
