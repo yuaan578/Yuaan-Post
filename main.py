@@ -1930,9 +1930,40 @@ REELS_LOGIC = r"""
 FEED_VIDEO_LOGIC = r"""
 (function () {
   var W = window, D = document;
-  if (W.__ypFeed) { try { W.__ypFeed.dispose(); } catch (e) {} }
-  var timer = null;
+  var prev = W.__ypFeed;
+  var unlocked = prev ? !!prev.unlocked : false;
+  if (prev) { try { prev.dispose(); } catch (e) {} }
+  var timer = null, watchdog = null;
+  var CARD = '[data-testid="stVerticalBlockBorderWrapper"]';
   function inReel(v) { return !!v.closest('[class*="st-key-rlcard_"]'); }
+  function loud() { try { return !!(navigator.userActivation && navigator.userActivation.hasBeenActive); } catch (e) { return false; } }
+  function songFor(v) { var c = v.closest(CARD); return c ? c.querySelector('audio') : null; }   // the post's song player
+  function showPill() {
+    if (D.getElementById('yp-sound-pill')) return;
+    var p = D.createElement('div'); p.id = 'yp-sound-pill'; p.textContent = '🔊 Tap for sound';
+    p.style.cssText = 'position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:200;background:rgba(0,0,0,.72);color:#fff;padding:10px 18px;border-radius:999px;font:700 14px sans-serif;';
+    D.body.appendChild(p);
+  }
+  function hidePill() { var p = D.getElementById('yp-sound-pill'); if (p) p.remove(); }
+  function startSong(v) {
+    var a = songFor(v);
+    if (!a) return;
+    a.__ypWant = true;
+    if (a.paused) { var p = a.play(); if (p && p.catch) p.catch(function () { if (!state.unlocked) showPill(); }); }
+  }
+  function stopSong(v) { var a = songFor(v); if (a) { a.__ypWant = false; if (!a.paused) a.pause(); } }
+  function unlock() {
+    if (state.unlocked) return;
+    state.unlocked = true; hidePill();
+    D.querySelectorAll('video').forEach(function (v) {
+      if (inReel(v)) return;
+      if (v.__ypVisible) { v.muted = false; if (!v.paused) startSong(v); }
+    });
+    // give every song player permission to play later
+    D.querySelectorAll(CARD + ' audio').forEach(function (a) {
+      if (a.paused && !a.__ypWant) { var p = a.play(); if (p && p.then) p.then(function () { if (!a.__ypWant) { a.pause(); } }).catch(function () {}); }
+    });
+  }
   function addAgain(v) {
     var host = v.parentElement;
     if (!host || host.querySelector('.yp-again')) return;
@@ -1941,22 +1972,38 @@ FEED_VIDEO_LOGIC = r"""
     o.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:3;border-radius:12px;';
     var b = D.createElement('button'); b.textContent = '↻ Watch again';
     b.style.cssText = 'background:#fff;color:#111;border:none;border-radius:999px;padding:10px 20px;font-weight:700;font-size:15px;cursor:pointer;';
-    b.onclick = function (ev) { ev.stopPropagation(); o.remove(); v.__ypStopped = false; v.currentTime = 0; v.play(); };
+    b.onclick = function (ev) { ev.stopPropagation(); o.remove(); v.__ypStopped = false; var a = songFor(v); if (a) { try { a.currentTime = 0; } catch (x) {} } v.currentTime = 0; v.play(); };
     o.appendChild(b); host.appendChild(o);
   }
-  function onEnded(e) { var v = e.target; if (v && v.tagName === 'VIDEO' && !inReel(v)) { v.__ypStopped = true; addAgain(v); } }
+  function onEnded(e) { var v = e.target; if (v && v.tagName === 'VIDEO' && !inReel(v)) { v.__ypStopped = true; stopSong(v); addAgain(v); } }
   function onPlay(e) {
     var v = e.target;
-    if (v && v.tagName === 'VIDEO' && v.parentElement) { var o = v.parentElement.querySelector('.yp-again'); if (o) o.remove(); }
+    if (!v || v.tagName !== 'VIDEO' || inReel(v)) return;
+    if (v.parentElement) { var o = v.parentElement.querySelector('.yp-again'); if (o) o.remove(); }
+    var a = songFor(v);
+    if (a && v.currentTime < 1) { try { a.currentTime = 0; } catch (x) {} }
+    startSong(v);
   }
-  function onPause(e) { var v = e.target; if (v && v.tagName === 'VIDEO' && !v.ended && !v.__ypHalting && v.__ypVisible) v.__ypStopped = true; }
-  // autoplay (silent, like Instagram) while a video is on screen; pause when it scrolls away
+  function onPause(e) {
+    var v = e.target;
+    if (!v || v.tagName !== 'VIDEO' || inReel(v) || v.ended) return;
+    stopSong(v);
+    if (!v.__ypHalting && v.__ypVisible) v.__ypStopped = true;
+  }
+  // autoplay while a video is on screen (with its song if the post has one); pause when it scrolls away
   var io = new W.IntersectionObserver(function (entries) {
     entries.forEach(function (e) {
       var v = e.target;
       if (e.isIntersecting && e.intersectionRatio >= 0.5) {
         v.__ypVisible = true;
-        if (!v.__ypStopped && v.paused) { v.muted = true; var p = v.play(); if (p && p.catch) p.catch(function () {}); }
+        if (!v.__ypStopped && v.paused) {
+          var hasSong = !!songFor(v);
+          v.volume = hasSong ? 0.2 : 1;
+          v.muted = !(loud() || state.unlocked);
+          var p = v.play();
+          if (p && p.catch) p.catch(function () { v.muted = true; var q = v.play(); if (q && q.catch) q.catch(function () {}); showPill(); });
+          if (v.muted && !state.unlocked) showPill();
+        }
       } else {
         v.__ypVisible = false; v.__ypStopped = false;
         if (!v.paused) { v.__ypHalting = true; v.pause(); setTimeout(function () { v.__ypHalting = false; }, 100); }
@@ -1966,17 +2013,22 @@ FEED_VIDEO_LOGIC = r"""
   function setup() {
     D.querySelectorAll('video').forEach(function (v) {
       if (inReel(v) || v.__ypBound) return;
-      v.__ypBound = true; v.setAttribute('playsinline', ''); v.muted = true; io.observe(v);
+      v.__ypBound = true; v.setAttribute('playsinline', ''); io.observe(v);
     });
   }
+  function gesture() { unlock(); }
+  ['touchend', 'pointerup', 'click', 'keydown'].forEach(function (n) { D.addEventListener(n, gesture, true); });
   var mo = new W.MutationObserver(function () { clearTimeout(timer); timer = setTimeout(setup, 150); });
   mo.observe(D.body, { childList: true, subtree: true });
   D.addEventListener('ended', onEnded, true); D.addEventListener('play', onPlay, true); D.addEventListener('pause', onPause, true);
-  W.__ypFeed = { dispose: function () {
-    io.disconnect(); mo.disconnect(); clearTimeout(timer);
+  watchdog = setInterval(function () { if (!D.querySelector('video')) hidePill(); }, 1000);
+  var state = { unlocked: unlocked, dispose: function () {
+    io.disconnect(); mo.disconnect(); clearTimeout(timer); clearInterval(watchdog);
     D.removeEventListener('ended', onEnded, true); D.removeEventListener('play', onPlay, true); D.removeEventListener('pause', onPause, true);
+    ['touchend', 'pointerup', 'click', 'keydown'].forEach(function (n) { D.removeEventListener(n, gesture, true); });
     D.querySelectorAll('video').forEach(function (v) { v.__ypBound = false; });
   } };
+  W.__ypFeed = state;
   setup();
 })();
 """
@@ -2540,7 +2592,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v54")
+    st.caption("Design v55")
     perf_slot = st.empty() if admin_mode else None
 
 if st.session_state.page != "reels":
