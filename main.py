@@ -85,7 +85,7 @@ def make_theme(bg, primary, secondary, ink=None, accents=None):
         ink = ink or "#F3F0FF"
         outline = secondary if luminance(secondary) > 0.25 else mix(secondary, "#FFFFFF", 0.5)
     else:
-        bg = mix(bg, primary, 0.07)          # page slightly deeper than the white cards, so each card stands out
+        bg = mix(bg, primary, 0.10)          # page slightly deeper than the white cards, so each card stands out
         surface = "#FFFFFF"
         surface2 = mix(bg, primary, 0.14)
         border = mix(bg, primary, 0.30)
@@ -94,6 +94,7 @@ def make_theme(bg, primary, secondary, ink=None, accents=None):
     accents = accents or [primary, secondary, mix(primary, secondary, 0.5), "#F59E0B"]
     d = darken_for_white_text
     return {
+        "line": "#F5F5F5" if dark else "#141414",   # card outlines: white on dark themes, black on light ones
         "dark": dark, "bg": bg, "surface": surface, "surface2": surface2, "border": border, "ink": ink,
         "primary": primary, "outline": outline, "accents": accents,
         "btn": (d(primary), d(accents[3], 0.26)), "btn_hover": (d(secondary), d(primary)),
@@ -187,11 +188,11 @@ hr { border-color: __BORDER__ !important; }
 .stTextInput input:focus, .stTextArea textarea:focus { border-color: __PRIMARY__ !important; }
 
 /* cards: flat, thin line */
-[data-testid="stVerticalBlockBorderWrapper"] { background: __SURFACE__; border: 1px solid __BORDER__; border-radius: 18px;
-    box-shadow: 0 1px 2px __SHADOW__, 0 10px 24px -14px __SHADOW__; }
+[data-testid="stVerticalBlockBorderWrapper"] { background: __SURFACE__; border: 1.5px solid __LINE__; border-radius: 18px;
+    box-shadow: 0 1px 2px __SHADOW__, 0 12px 26px -12px __SHADOW__; }
 [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stVerticalBlockBorderWrapper"] { box-shadow: none; }
-[data-testid="stForm"] { background: transparent; border: 1px solid __BORDER__; border-radius: 16px; }
-[data-testid="stExpander"] { border: 1px solid __BORDER__; border-radius: 12px; background: transparent; }
+[data-testid="stForm"] { background: transparent; border: 1.5px solid __LINE__; border-radius: 16px; }
+[data-testid="stExpander"] { border: 1.5px solid __LINE__; border-radius: 12px; background: transparent; }
 [data-testid="stAlert"] { background: __SURFACE2__; border: none; border-radius: 12px; }
 [data-testid="stAlert"] * { color: __INK__ !important; }
 .block-container { padding-top: 2.2rem; }
@@ -224,7 +225,7 @@ def build_css(t, wall_url=None):
     r, g, b = _rgb(t["primary"])
     shadow = "rgba(0,0,0,.45)" if t["dark"] else f"rgba({r},{g},{b},.22)"
     tokens = {
-        "__BG__": t["bg"], "__SURFACE__": t["surface"], "__SURFACE2__": t["surface2"], "__BORDER__": t["border"],
+        "__BG__": t["bg"], "__SURFACE__": t["surface"], "__SURFACE2__": t["surface2"], "__BORDER__": t["border"], "__LINE__": t["line"],
         "__INK__": t["ink"], "__PRIMARY__": t["primary"], "__OUTLINE__": t["outline"], "__SHADOW__": shadow,
         "__BTN1__": t["btn"][0], "__BTN2__": t["btn"][1], "__HOV1__": t["btn_hover"][0], "__HOV2__": t["btn_hover"][1],
         "__BUB1__": t["bubble"][0], "__BUB2__": t["bubble"][1],
@@ -2480,7 +2481,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v51")
+    st.caption("Design v52")
     perf_slot = st.empty() if admin_mode else None
 
 if st.session_state.page != "reels":
