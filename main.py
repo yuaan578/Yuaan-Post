@@ -10,6 +10,9 @@ import hashlib
 import hmac
 import time
 import requests
+import subprocess
+import tempfile
+import shutil
 import psycopg2
 from urllib.parse import quote, unquote
 import psycopg2.pool
@@ -1316,9 +1319,62 @@ def parse_song(raw):
     return None
 
 
+def _ffmpeg_path():
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return shutil.which("ffmpeg")
+
+
+def fetch_song_bytes(url):
+    if not _safe_url(url):
+        return None
+    r = requests.get(url, timeout=20)
+    return r.content if r.status_code == 200 and r.content else None
+
+
+def mix_song_into_video(video_bytes, song_url):
+    """Puts the song into the video's own sound (the video keeps its voices, quieter). Returns mp4 bytes, or None if it couldn't.
+    A song inside the video plays wherever the video plays, so it can never be blocked by the browser."""
+    ff = _ffmpeg_path()
+    if not ff:
+        return None
+    try:
+        song = fetch_song_bytes(song_url)
+        if not song:
+            return None
+        with tempfile.TemporaryDirectory() as tmp:
+            vin, sin, out = (os.path.join(tmp, n) for n in ("in_video", "in_song", "out.mp4"))
+            open(vin, "wb").write(video_bytes)
+            open(sin, "wb").write(song)
+            tail = ["-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-shortest", out]
+            base = [ff, "-y", "-loglevel", "error", "-i", vin, "-stream_loop", "-1", "-i", sin]
+            attempts = [
+                # the video has its own sound: keep it, a little quieter, under the song
+                base + ["-filter_complex", "[0:a]volume=0.5[a0];[1:a]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]",
+                        "-map", "0:v", "-map", "[a]"] + tail,
+                # no sound in the video: just the song
+                base + ["-map", "0:v", "-map", "1:a"] + tail,
+            ]
+            for cmd in attempts:
+                try:
+                    done = subprocess.run(cmd, capture_output=True, timeout=150)
+                except Exception:
+                    continue
+                if done.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 1000:
+                    return open(out, "rb").read()
+        return None
+    except Exception:
+        return None
+
+
 def render_song(raw):
     sg = parse_song(raw)
     if not sg:
+        return
+    if sg.get("mixed"):   # the song is already inside the video's sound
+        st.markdown(f"🎵 **{html.escape(sg['title'])}** · {html.escape(sg.get('artist', ''))}", unsafe_allow_html=True)
         return
     if sg["t"] == "spotify":
         components.iframe(f"https://open.spotify.com/embed/{sg['k']}/{sg['id']}",
@@ -2603,7 +2659,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v56")
+    st.caption("Design v57")
     perf_slot = st.empty() if admin_mode else None
 
 if st.session_state.page != "reels":
@@ -2823,6 +2879,9 @@ if st.session_state.page == "feed":
                     post_id = str(uuid.uuid4())
                     created_at = utc_now().isoformat()
                     saved_files = []  # (key, mime type)
+                    mix_song = parse_song(st.session_state.get("post_song"))
+                    mix_url = mix_song["url"] if mix_song and mix_song["t"] == "preview" else None
+                    mixed = False
                     problem = None
                     with st.spinner("Posting..."):
                         try:
@@ -2833,7 +2892,12 @@ if st.session_state.page == "feed":
                                         problem = f"A video is bigger than {MAX_VIDEO_MB} MB. Choose a shorter one."
                                         break
                                     mime = "video/quicktime" if ext == ".mov" else (file.type or "video/mp4")
-                                    saved_files.append((upload_file(file.getvalue(), "posts", ext or ".mp4", mime), mime))
+                                    data = file.getvalue()
+                                    if mix_url and not mixed:
+                                        with_song = mix_song_into_video(data, mix_url)
+                                        if with_song:
+                                            data, ext, mime, mixed = with_song, ".mp4", "video/mp4", True
+                                    saved_files.append((upload_file(data, "posts", ext or ".mp4", mime), mime))
                                 else:
                                     saved_files.append((upload_file(prepare_photo(file.getvalue()), "posts", ".jpg", "image/jpeg"), "image/jpeg"))
                         except Exception:
@@ -2844,6 +2908,8 @@ if st.session_state.page == "feed":
                         st.error(problem)
                     else:
                         song_value = st.session_state.get("post_song") if parse_song(st.session_state.get("post_song")) else None
+                        if song_value and mixed:
+                            song_value = json.dumps({**mix_song, "mixed": True})
                         run("INSERT INTO posts (id, author_username, note, created_at, song) VALUES (?, ?, ?, ?, ?)",
                             (post_id, current_user, note, created_at, song_value))
                         for k in ("post_song", "song_results", "song_searched"):
@@ -2934,11 +3000,18 @@ elif st.session_state.page == "reels":
                         ext = os.path.splitext(reel_file.name)[1].lower() or ".mp4"
                         mime = {".mov": "video/quicktime", ".webm": "video/webm"}.get(ext, "video/mp4")
                         try:
-                            with st.spinner("Uploading your reel..."):
-                                reel_key = upload_file(reel_file.getvalue(), "reels", ext, mime)
+                            data = reel_file.getvalue()
+                            reel_song_value = st.session_state.get("reel_song") if parse_song(st.session_state.get("reel_song")) else None
+                            with st.spinner("Uploading your reel..." if not reel_song_value else "Adding the song and uploading (about 10 seconds)..."):
+                                if reel_song_value:
+                                    rs = parse_song(reel_song_value)
+                                    with_song = mix_song_into_video(data, rs["url"]) if rs["t"] == "preview" else None
+                                    if with_song:
+                                        data, ext, mime = with_song, ".mp4", "video/mp4"
+                                        reel_song_value = json.dumps({**rs, "mixed": True})
+                                reel_key = upload_file(data, "reels", ext, mime)
                             run("INSERT INTO reels (id, author_username, video_path, caption, created_at, song) VALUES (?, ?, ?, ?, ?, ?)",
-                                (reel_id, current_user, reel_key, reel_caption.strip(), utc_now().isoformat(),
-                                 st.session_state.get("reel_song") if parse_song(st.session_state.get("reel_song")) else None))
+                                (reel_id, current_user, reel_key, reel_caption.strip(), utc_now().isoformat(), reel_song_value))
                             for k in ("reel_song", "song_results", "song_searched"):
                                 st.session_state.pop(k, None)
                             st.session_state.reel_idx = 0  # show the new reel first
@@ -2960,7 +3033,7 @@ elif st.session_state.page == "reels":
         reel_songs = {}
         for reel_id, author, video_path, caption, created_at, song in reels:
             sg = parse_song(song)
-            if sg and sg["t"] == "preview":
+            if sg and sg["t"] == "preview" and not sg.get("mixed"):
                 reel_songs[reel_id] = sg["url"]
             n_likes, liked = reel_likes_map.get(reel_id, (0, False))
             comments_here = reel_comments_map.get(reel_id, [])
