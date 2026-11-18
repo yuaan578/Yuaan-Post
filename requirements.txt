@@ -2,3 +2,4 @@ streamlit>=1.42
 Pillow
 requests
 psycopg2-binary
+imageio-ffmpeg
