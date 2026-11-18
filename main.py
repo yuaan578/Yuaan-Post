@@ -398,7 +398,7 @@ def schema_sql():
         "CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, username TEXT NOT NULL, expires_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS friendships (id TEXT PRIMARY KEY, requester TEXT NOT NULL, addressee TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, sender TEXT NOT NULL, receiver TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, is_read INTEGER NOT NULL DEFAULT 0)",
-        "CREATE TABLE IF NOT EXISTS reels (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, video_path TEXT NOT NULL, caption TEXT NOT NULL, created_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS reels (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, video_path TEXT NOT NULL, caption TEXT NOT NULL, created_at TEXT NOT NULL, song TEXT)",
         "CREATE TABLE IF NOT EXISTS reel_likes (reel_id TEXT NOT NULL, username TEXT NOT NULL, PRIMARY KEY (reel_id, username))",
         "CREATE TABLE IF NOT EXISTS follows (follower TEXT NOT NULL, followee TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (follower, followee))",
         # each person's private conversation with Yuaan
@@ -442,7 +442,8 @@ def init_db():
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS notif_seen_at TEXT",
                 "ALTER TABLE posts ADD COLUMN IF NOT EXISTS song TEXT",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TEXT",
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS wallpaper TEXT"):
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS wallpaper TEXT",
+                "ALTER TABLE reels ADD COLUMN IF NOT EXISTS song TEXT"):
         try:
             run(sql)
         except Exception:
@@ -1345,6 +1346,17 @@ def cb_song_pick(i):
         st.session_state.song_results = []
 
 
+def cb_reel_song_pick(i):
+    results = st.session_state.get("song_results", [])
+    if 0 <= i < len(results):
+        st.session_state.reel_song = json.dumps(results[i])
+        st.session_state.song_results = []
+
+
+def cb_reel_song_remove():
+    st.session_state.pop("reel_song", None)
+
+
 def cb_song_link():
     sg = song_from_link(st.session_state.get("song_link"))
     if sg:
@@ -1759,7 +1771,7 @@ def render_group_messages(me, gid):
 
 # --- reels ---
 def get_reels():
-    return run("SELECT id, author_username, video_path, caption, created_at FROM reels ORDER BY created_at DESC", fetch="all")
+    return run("SELECT id, author_username, video_path, caption, created_at, song FROM reels ORDER BY created_at DESC", fetch="all")
 
 
 def reel_likes(reel_id, me):
@@ -1781,8 +1793,10 @@ REELS_CSS = """<style>
 [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"], [data-testid="collapsedControl"], [data-testid="stHeader"] { display: none !important; }
 .block-container, [data-testid="stMainBlockContainer"] { padding: 0 !important; max-width: 100% !important; }
 [data-testid="stMain"], section.main { scroll-snap-type: y mandatory; overscroll-behavior: contain; }
+.stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] { background: #000 !important; background-image: none !important; }
 [class*="st-key-rlcard_"] {
-    position: relative; height: 100vh !important; height: 100dvh !important; min-height: 100vh !important; min-height: 100dvh !important; flex-shrink: 0 !important; width: 100%; background: #000; border-radius: 0; overflow: hidden; margin: 0; gap: 0 !important;
+    position: relative; height: 100vh !important; height: 100dvh !important; min-height: 100vh !important; min-height: 100dvh !important; flex-shrink: 0 !important;
+    width: min(100%, 56.25dvh) !important; margin-left: auto !important; margin-right: auto !important;   /* on a laptop: a phone-shaped column in the middle */ background: #000; border-radius: 0; overflow: hidden; gap: 0 !important;
     scroll-snap-align: start; scroll-snap-stop: always;
 }
 [class*="st-key-rlcard_"] [data-testid="stElementContainer"]:has(video) { position: absolute; inset: 0; z-index: 1; }
@@ -1799,46 +1813,119 @@ REELS_CSS = """<style>
 [class*="st-key-rlrail_"] button p, [class*="st-key-rlrail_"] button span, .st-key-rltop button p { color: #fff !important; font-size: 15px !important; margin: 0; line-height: 1.1; }
 [class*="st-key-rlrail_"] [data-testid="stIconMaterial"], [class*="st-key-rlrail_"] button svg { display: none !important; }
 /* back arrow and upload, floating at the top */
-.st-key-rltop { position: fixed; top: calc(10px + env(safe-area-inset-top)); left: 10px; right: 10px; z-index: 100; display: flex; flex-direction: row; justify-content: space-between; align-items: center; gap: 8px; pointer-events: none; }
+.st-key-rltop { position: fixed; top: calc(10px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); width: min(calc(100vw - 20px), calc(56.25dvh - 20px)); z-index: 100; display: flex; flex-direction: row; justify-content: space-between; align-items: center; gap: 8px; pointer-events: none; }
 .st-key-rltop > * { pointer-events: auto; width: 52px !important; flex: 0 0 auto; }
 .st-key-rlend { height: 40vh; display: flex; align-items: center; justify-content: center; }
 </style>"""
 
-REELS_JS = """<script>
+REELS_LOGIC = r"""
 (function () {
-  var pwin = window.parent, pdoc = pwin.document, token = Math.random();
-  function loud() { try { return !!(pwin.navigator.userActivation && pwin.navigator.userActivation.hasBeenActive); } catch (e) { return false; } }
+  var W = window, D = document;
+  var prev = W.__ypReels;
+  var audios = prev ? prev.audios : {};
+  if (prev) { try { prev.dispose(); } catch (e) {} }
+  var SONGS = __SONGS__;
+  var active = null, timer = null, watchdog = null;
+  function loud() { try { return !!(navigator.userActivation && navigator.userActivation.hasBeenActive); } catch (e) { return false; } }
+  function reelId(v) {
+    var c = v.closest('[class*="st-key-rlcard_"]');
+    var m = c && /st-key-rlcard_([A-Za-z0-9-]+)/.exec(c.className);
+    return m ? m[1] : null;
+  }
+  function audioFor(v) {
+    var id = reelId(v);
+    if (!id || !SONGS[id]) return null;
+    if (!audios[id]) { var a = new Audio(SONGS[id]); a.loop = true; a.preload = 'auto'; audios[id] = a; }
+    return audios[id];
+  }
+  function startSong(v) { var a = audioFor(v); if (a && a.paused) { var p = a.play(); if (p && p.catch) p.catch(function () {}); } }
   function play(v) {
+    var a = audioFor(v);
     v.muted = !loud();
+    if (a) { v.volume = 0.2; }
     var p = v.play();
     if (p && p.catch) p.catch(function () { v.muted = true; var q = v.play(); if (q && q.catch) q.catch(function () {}); });
+    if (a) startSong(v);
   }
-  var io = new pwin.IntersectionObserver(function (entries) {
+  function halt(v) { try { v.pause(); } catch (x) {} var a = audioFor(v); if (a) { try { a.pause(); a.currentTime = 0; } catch (x) {} } }
+  var io = new W.IntersectionObserver(function (entries) {
     entries.forEach(function (e) {
       var v = e.target;
-      if (e.isIntersecting && e.intersectionRatio >= 0.6) { play(v); } else { try { v.pause(); } catch (x) {} }
+      if (e.isIntersecting && e.intersectionRatio >= 0.6) { active = v; play(v); } else { if (active === v) active = null; halt(v); }
     });
   }, { threshold: [0, 0.6, 1] });
-  function setup() {
-    pdoc.querySelectorAll('[class*="st-key-rlcard_"] video').forEach(function (v) {
-      if (v.__reelsToken === token) return;
-      v.__reelsToken = token; v.loop = true; v.controls = false; v.setAttribute('playsinline', ''); v.preload = 'metadata'; io.observe(v);
-      v.addEventListener('click', function () {
-        if (v.muted) { v.muted = false; if (v.paused) play(v); }
-        else if (v.paused) { v.play(); } else { v.pause(); }
-      });
-    });
+  function bind(v) {
+    if (v.__ypClick) v.removeEventListener('click', v.__ypClick);
+    if (v.__ypTime) v.removeEventListener('timeupdate', v.__ypTime);
+    v.__ypLast = 0;
+    v.__ypClick = function () {
+      var a = audioFor(v);
+      if (v.muted) { v.muted = false; if (v.paused) play(v); else startSong(v); }
+      else if (v.paused) { v.play(); if (a) startSong(v); }
+      else { v.pause(); if (a) a.pause(); }
+    };
+    v.__ypTime = function () {   // the video started over: start the song over too
+      var a = audioFor(v);
+      if (a && v.currentTime + 0.5 < v.__ypLast) { try { a.currentTime = 0; } catch (x) {} }
+      v.__ypLast = v.currentTime;
+    };
+    v.addEventListener('click', v.__ypClick);
+    v.addEventListener('timeupdate', v.__ypTime);
+    v.loop = true; v.controls = false; v.setAttribute('playsinline', ''); v.preload = 'metadata';
+    io.observe(v);
   }
+  function setup() { D.querySelectorAll('[class*="st-key-rlcard_"] video').forEach(bind); }
+  function unmute() { if (active) { active.muted = false; startSong(active); } }
+  D.addEventListener('touchend', unmute, { once: true, passive: true });
+  D.addEventListener('click', unmute, { once: true });
+  var mo = new W.MutationObserver(function () { clearTimeout(timer); timer = setTimeout(setup, 150); });
+  mo.observe(D.body, { childList: true, subtree: true });
+  function silence() { Object.keys(audios).forEach(function (k) { try { audios[k].pause(); } catch (x) {} }); }
+  var state = {
+    audios: audios,
+    dispose: function () { io.disconnect(); mo.disconnect(); clearTimeout(timer); clearInterval(watchdog); },
+  };
+  // left the Reels page: stop every song
+  watchdog = setInterval(function () {
+    if (!D.querySelector('[class*="st-key-rlcard_"]')) { silence(); state.dispose(); W.__ypReels = null; }
+  }, 700);
+  W.__ypReels = state;
   setup();
-  // first touch anywhere: if the phone started a video silent, give it sound
-  function unmute() { pdoc.querySelectorAll('[class*="st-key-rlcard_"] video').forEach(function (v) { if (!v.paused) v.muted = false; }); }
-  pdoc.addEventListener('touchend', unmute, { once: true, passive: true });
-  pdoc.addEventListener('click', unmute, { once: true });
-  var timer = null;
-  new pwin.MutationObserver(function () { clearTimeout(timer); timer = setTimeout(setup, 150); })
-    .observe(pdoc.body, { childList: true, subtree: true });
 })();
-</script>"""
+"""
+
+FEED_VIDEO_LOGIC = r"""
+(function () {
+  var W = window, D = document;
+  if (W.__ypEnded) D.removeEventListener('ended', W.__ypEnded, true);
+  if (W.__ypPlay) D.removeEventListener('play', W.__ypPlay, true);
+  W.__ypEnded = function (e) {
+    var v = e.target;
+    if (!v || v.tagName !== 'VIDEO' || v.closest('[class*="st-key-rlcard_"]')) return;
+    var host = v.parentElement;
+    if (!host || host.querySelector('.yp-again')) return;
+    if (W.getComputedStyle(host).position === 'static') host.style.position = 'relative';
+    var o = D.createElement('div'); o.className = 'yp-again';
+    o.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:3;border-radius:12px;';
+    var b = D.createElement('button'); b.textContent = '↻ Watch again';
+    b.style.cssText = 'background:#fff;color:#111;border:none;border-radius:999px;padding:10px 20px;font-weight:700;font-size:15px;cursor:pointer;';
+    b.onclick = function (ev) { ev.stopPropagation(); o.remove(); v.currentTime = 0; v.play(); };
+    o.appendChild(b); host.appendChild(o);
+  };
+  W.__ypPlay = function (e) {
+    var v = e.target;
+    if (v && v.tagName === 'VIDEO' && v.parentElement) { var o = v.parentElement.querySelector('.yp-again'); if (o) o.remove(); }
+  };
+  D.addEventListener('ended', W.__ypEnded, true);
+  D.addEventListener('play', W.__ypPlay, true);
+})();
+"""
+
+
+def inject_js(code, script_id):
+    """Runs JavaScript in the main page (not inside the little invisible frame), so it keeps working between taps."""
+    return ("<script>(function(){var d=window.parent.document;var old=d.getElementById(" + json.dumps(script_id) + ");if(old)old.remove();"
+            "var s=d.createElement('script');s.id=" + json.dumps(script_id) + ";s.textContent=" + json.dumps(code) + ";d.head.appendChild(s);})();</script>")
 
 
 def short_count(n):
@@ -2393,8 +2480,11 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v49")
+    st.caption("Design v51")
     perf_slot = st.empty() if admin_mode else None
+
+if st.session_state.page != "reels":
+    components.html(inject_js(FEED_VIDEO_LOGIC, "yp-feedvideo-js"), height=0)
 
 # ------------------------------------------
 # Shared by the Feed and For You pages
@@ -2697,6 +2787,17 @@ elif st.session_state.page == "reels":
     with st.container(key="rltop"):
         st.button("←", key="rl_back", on_click=cb_go_page, args=("feed",), help="Back")
         with st.popover("＋"):
+            chosen_song = parse_song(st.session_state.get("reel_song"))
+            if chosen_song:
+                st.caption(f"🎵 {chosen_song['title']} · {chosen_song.get('artist', '')}")
+                st.button("Remove song", key="reel_song_remove", on_click=cb_reel_song_remove)
+            else:
+                st.text_input("Add a song (optional)", key="song_q", placeholder="Search a song or artist")
+                st.button("Search", key="song_search_btn", on_click=cb_song_search)
+                for i, sg in enumerate(st.session_state.get("song_results", [])):
+                    c1, c2 = st.columns([4, 2])
+                    c1.markdown(f"**{html.escape(sg['title'])}**  \n{html.escape(sg['artist'])}", unsafe_allow_html=True)
+                    c2.button("Choose", key=f"song_pick_{i}", on_click=cb_reel_song_pick, args=(i,))
             with st.form("reel_form", clear_on_submit=True):
                 reel_file = st.file_uploader("Video (MP4 works best)", type=["mp4", "mov", "webm"])
                 reel_caption = st.text_input("Caption")
@@ -2712,8 +2813,11 @@ elif st.session_state.page == "reels":
                         try:
                             with st.spinner("Uploading your reel..."):
                                 reel_key = upload_file(reel_file.getvalue(), "reels", ext, mime)
-                            run("INSERT INTO reels (id, author_username, video_path, caption, created_at) VALUES (?, ?, ?, ?, ?)",
-                                (reel_id, current_user, reel_key, reel_caption.strip(), utc_now().isoformat()))
+                            run("INSERT INTO reels (id, author_username, video_path, caption, created_at, song) VALUES (?, ?, ?, ?, ?, ?)",
+                                (reel_id, current_user, reel_key, reel_caption.strip(), utc_now().isoformat(),
+                                 st.session_state.get("reel_song") if parse_song(st.session_state.get("reel_song")) else None))
+                            for k in ("reel_song", "song_results", "song_searched"):
+                                st.session_state.pop(k, None)
                             st.session_state.reel_idx = 0  # show the new reel first
                             st.rerun()
                         except (RuntimeError, requests.RequestException):
@@ -2730,7 +2834,11 @@ elif st.session_state.page == "reels":
         reel_likes_map, reel_comments_map, reel_saved = load_reel_extras([r[0] for r in reels], current_user)
         reel_targets = share_targets(current_user)
         i_follow = my_relations(current_user)[1]
-        for reel_id, author, video_path, caption, created_at in reels:
+        reel_songs = {}
+        for reel_id, author, video_path, caption, created_at, song in reels:
+            sg = parse_song(song)
+            if sg and sg["t"] == "preview":
+                reel_songs[reel_id] = sg["url"]
             n_likes, liked = reel_likes_map.get(reel_id, (0, False))
             comments_here = reel_comments_map.get(reel_id, [])
             with st.container(key=f"rlcard_{reel_id}"):
@@ -2740,6 +2848,8 @@ elif st.session_state.page == "reels":
                     st.markdown(person_html(author, size=34, subtitle=f"🕒 {thai_time(created_at, '%d %b, %H:%M')}"), unsafe_allow_html=True)
                     if caption:
                         st.markdown(html.escape(caption))
+                    if sg and sg["t"] == "preview":
+                        st.markdown(f"🎵 {html.escape(sg['title'])} · {html.escape(sg.get('artist', ''))}")
                 with st.container(key=f"rlrail_{reel_id}"):
                     if author != current_user:
                         st.button("✅" if author in i_follow else "➕", key=f"rl_fol_{reel_id}", on_click=cb_toggle_follow,
@@ -2773,7 +2883,7 @@ elif st.session_state.page == "reels":
         if len(all_reels) > reel_limit:
             with st.container(key="rlend"):
                 st.button("⬇ Load more reels", key="rl_more", on_click=cb_more_reels)
-        components.html(REELS_JS, height=0)
+        components.html(inject_js(REELS_LOGIC.replace("__SONGS__", json.dumps(reel_songs).replace("</", "<\\/")), "yp-reels-js"), height=0)
 
 # ------------------------------------------
 # PAGE: Friends (requests, search, friend list)
