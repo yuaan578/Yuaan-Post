@@ -79,15 +79,16 @@ def darken_for_white_text(h, max_lum=0.2):
 def make_theme(bg, primary, secondary, ink=None, accents=None):
     dark = luminance(bg) < 0.25
     if dark:
-        surface = mix(bg, "#FFFFFF", 0.07)
-        surface2 = mix(bg, "#FFFFFF", 0.13)
-        border = mix(bg, "#FFFFFF", 0.24)
+        surface = mix(bg, "#FFFFFF", 0.09)
+        surface2 = mix(bg, "#FFFFFF", 0.15)
+        border = mix(bg, "#FFFFFF", 0.20)
         ink = ink or "#F3F0FF"
         outline = secondary if luminance(secondary) > 0.25 else mix(secondary, "#FFFFFF", 0.5)
     else:
+        bg = mix(bg, primary, 0.07)          # page slightly deeper than the white cards, so each card stands out
         surface = "#FFFFFF"
-        surface2 = mix(bg, primary, 0.16)
-        border = mix(bg, primary, 0.28)
+        surface2 = mix(bg, primary, 0.14)
+        border = mix(bg, primary, 0.30)
         ink = ink or "#1A1530"
         outline = darken_for_white_text(secondary, 0.3)
     accents = accents or [primary, secondary, mix(primary, secondary, 0.5), "#F59E0B"]
@@ -118,6 +119,10 @@ THEMES = {
     "Sunset":   make_theme("#FFF1F2", "#E8590C", "#C2185B", "#3B0A1E", ["#E8590C", "#C2185B", "#7B2CBF", "#F4A300"]),
     "Mint":     make_theme("#E9FBF3", "#0E9F6E", "#2563EB", "#0A3326", ["#0E9F6E", "#2563EB", "#EC4899", "#F59E0B"]),
     "Midnight": make_theme("#0F0B24", "#FF4FA3", "#8B7BFF", None, ["#FF4FA3", "#8B7BFF", "#2DD4BF", "#FFD166"]),
+    "Rose":     make_theme("#FFF0F5", "#D6336C", "#7048E8", "#2B0A1A"),
+    "Sand":     make_theme("#FAF3E8", "#B5651D", "#2F7D5B", "#2E2012"),
+    "Graphite": make_theme("#14161A", "#60A5FA", "#A78BFA", None),
+    "Forest":   make_theme("#0D1912", "#4ADE80", "#22D3EE", None),
 }
 THEME_NAMES = list(THEMES.keys()) + ["Custom"]
 DEFAULT_CUSTOM = ("#F6F1FF", "#E91E78", "#6C3DFF")  # background, main colour, second colour
@@ -182,7 +187,9 @@ hr { border-color: __BORDER__ !important; }
 .stTextInput input:focus, .stTextArea textarea:focus { border-color: __PRIMARY__ !important; }
 
 /* cards: flat, thin line */
-[data-testid="stVerticalBlockBorderWrapper"] { background: __SURFACE__; border: 1px solid __BORDER__; border-radius: 16px; box-shadow: none; }
+[data-testid="stVerticalBlockBorderWrapper"] { background: __SURFACE__; border: 1px solid __BORDER__; border-radius: 18px;
+    box-shadow: 0 1px 2px __SHADOW__, 0 10px 24px -14px __SHADOW__; }
+[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stVerticalBlockBorderWrapper"] { box-shadow: none; }
 [data-testid="stForm"] { background: transparent; border: 1px solid __BORDER__; border-radius: 16px; }
 [data-testid="stExpander"] { border: 1px solid __BORDER__; border-radius: 12px; background: transparent; }
 [data-testid="stAlert"] { background: __SURFACE2__; border: none; border-radius: 12px; }
@@ -213,9 +220,9 @@ button[data-baseweb="tab"][aria-selected="true"], button[data-baseweb="tab"][ari
 """
 
 
-def build_css(t):
+def build_css(t, wall_url=None):
     r, g, b = _rgb(t["primary"])
-    shadow = "rgba(0,0,0,.45)" if t["dark"] else f"rgba({r},{g},{b},.18)"
+    shadow = "rgba(0,0,0,.45)" if t["dark"] else f"rgba({r},{g},{b},.22)"
     tokens = {
         "__BG__": t["bg"], "__SURFACE__": t["surface"], "__SURFACE2__": t["surface2"], "__BORDER__": t["border"],
         "__INK__": t["ink"], "__PRIMARY__": t["primary"], "__OUTLINE__": t["outline"], "__SHADOW__": shadow,
@@ -223,6 +230,18 @@ def build_css(t):
         "__BUB1__": t["bubble"][0], "__BUB2__": t["bubble"][1],
     }
     css = CSS_TEMPLATE
+    if wall_url:
+        # a wallpaper: a soft wash of the theme colour over the picture, and see-through frosted cards so text stays readable
+        sr, sg, sb_ = _rgb(t["surface"])
+        br, bg_, bb = _rgb(t["bg"])
+        safe = wall_url.replace('"', "").replace("'", "").replace("(", "").replace(")", "")
+        css += f"""
+.stApp {{ background-image: linear-gradient(rgba({br},{bg_},{bb},.42), rgba({br},{bg_},{bb},.42)), url("{safe}") !important;
+         background-size: cover !important; background-position: center !important; background-repeat: no-repeat !important; }}
+[data-testid="stAppViewContainer"], [data-testid="stMain"], [data-testid="stBottom"] > div {{ background: transparent !important; }}
+[data-testid="stVerticalBlockBorderWrapper"], [data-testid="stForm"] {{ background: rgba({sr},{sg},{sb_},.86) !important; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }}
+[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {{ background: rgba({sr},{sg},{sb_},.90) !important; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }}
+"""
     for key, val in tokens.items():
         css = css.replace(key, val)
     return css
@@ -371,7 +390,7 @@ TABLE_NAMES = ("users", "posts", "media", "comments", "sessions", "friendships",
 def schema_sql():
     """Every statement that builds the tables, indexes and security rules (used for setup and for the move tool)."""
     tables = [
-        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL, display_name TEXT NOT NULL, avatar_path TEXT, theme TEXT, bio TEXT, notif_seen_at TEXT, last_seen TEXT)",
+        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL, display_name TEXT NOT NULL, avatar_path TEXT, theme TEXT, bio TEXT, notif_seen_at TEXT, last_seen TEXT, wallpaper TEXT)",
         "CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, author_username TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL, song TEXT)",
         'CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY, post_id TEXT NOT NULL, file_path TEXT NOT NULL, file_type TEXT NOT NULL, "position" INTEGER NOT NULL)',
         # comments are used for both posts and reels (post_id holds either id)
@@ -422,7 +441,8 @@ def init_db():
     for sql in ("ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS notif_seen_at TEXT",
                 "ALTER TABLE posts ADD COLUMN IF NOT EXISTS song TEXT",
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TEXT"):
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TEXT",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS wallpaper TEXT"):
         try:
             run(sql)
         except Exception:
@@ -768,11 +788,25 @@ def cb_open_alerts(me):
     st.session_state.page = "alerts"
 
 
-def get_theme_value(username):
+def get_look(username):
+    """(theme, wallpaper file) in one database question."""
     if not username:
-        return "Pop"
-    row = ttl_cache(f"theme_{username}", 30, lambda: run("SELECT theme FROM users WHERE username = ?", (username,), "one"))
-    return row[0] if row and row[0] else "Pop"
+        return "Pop", None
+    row = ttl_cache(f"look_{username}", 30, lambda: run("SELECT theme, wallpaper FROM users WHERE username = ?", (username,), "one"))
+    return (row[0] or "Pop", row[1]) if row else ("Pop", None)
+
+
+def get_theme_value(username):
+    return get_look(username)[0]
+
+
+def cb_remove_wallpaper():
+    me = st.session_state.username
+    old = get_look(me)[1]
+    run("UPDATE users SET wallpaper = NULL WHERE username = ?", (me,))
+    if old:
+        delete_file(old)
+    st.toast("Wallpaper removed", icon="🖼️")
 
 
 # --- login sessions (keeps you logged in after refresh) ---
@@ -2196,8 +2230,9 @@ if not st.session_state.logged_in:
             del st.query_params["s"]
 
 # Apply the colours: the logged-in user's own theme, or the default on the login page
-T = parse_theme(get_theme_value(st.session_state.username) if st.session_state.logged_in else "Pop")
-st.markdown(f"<style>{build_css(T)}</style>", unsafe_allow_html=True)
+_theme_value, _wallpaper = get_look(st.session_state.username) if st.session_state.logged_in else ("Pop", None)
+T = parse_theme(_theme_value)
+st.markdown(f"<style>{build_css(T, file_url(_wallpaper) if _wallpaper else None)}</style>", unsafe_allow_html=True)
 
 if not st.session_state.logged_in:
     banner("Yuaan Post", "Log in or sign up to share moments with your friends.", "feed")
@@ -2329,12 +2364,36 @@ with st.sidebar:
             st.color_picker("Main colour", parts[1], key="theme_main", on_change=cb_save_theme)
             st.color_picker("Second colour", parts[2], key="theme_second", on_change=cb_save_theme)
 
+        st.caption("Wallpaper")
+        if "wall_nonce" not in st.session_state:
+            st.session_state.wall_nonce = 0
+        wall = st.file_uploader("Choose a picture", type=["png", "jpg", "jpeg"], key=f"wall_upload_{st.session_state.wall_nonce}",
+                                label_visibility="collapsed")
+        w1, w2 = st.columns(2)
+        if w1.button("Set wallpaper", key="wall_set_btn", use_container_width=True):
+            if wall:
+                try:
+                    with st.spinner("Saving..."):
+                        new_key = upload_file(prepare_photo(wall.getvalue(), side=1600, quality=80), "wallpapers", ".jpg", "image/jpeg")
+                    old_wall = get_look(current_user)[1]
+                    run("UPDATE users SET wallpaper = ? WHERE username = ?", (new_key, current_user))
+                    if old_wall:
+                        delete_file(old_wall)
+                    st.session_state.wall_nonce += 1
+                    st.rerun()
+                except (RuntimeError, requests.RequestException):
+                    st.warning("The picture couldn't be uploaded. Please try again.")
+            else:
+                st.warning("Choose a picture first")
+        if get_look(current_user)[1]:
+            w2.button("Remove", key="wall_rm_btn", on_click=cb_remove_wallpaper, use_container_width=True)
+
         dots = "".join(f'<span style="display:inline-block;width:26px;height:26px;border-radius:50%;background:{c};margin-right:6px;"></span>'
                        for c in T["accents"])
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v48")
+    st.caption("Design v49")
     perf_slot = st.empty() if admin_mode else None
 
 # ------------------------------------------
