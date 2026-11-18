@@ -1824,6 +1824,7 @@ REELS_LOGIC = r"""
   var W = window, D = document;
   var prev = W.__ypReels;
   var audios = prev ? prev.audios : {};
+  var unlocked = prev ? prev.unlocked : false;
   if (prev) { try { prev.dispose(); } catch (e) {} }
   var SONGS = __SONGS__;
   var active = null, timer = null, watchdog = null;
@@ -1833,16 +1834,37 @@ REELS_LOGIC = r"""
     var m = c && /st-key-rlcard_([A-Za-z0-9-]+)/.exec(c.className);
     return m ? m[1] : null;
   }
-  function audioFor(v) {
-    var id = reelId(v);
-    if (!id || !SONGS[id]) return null;
+  function mk(id) {
+    if (!SONGS[id]) return null;
     if (!audios[id]) { var a = new Audio(SONGS[id]); a.loop = true; a.preload = 'auto'; audios[id] = a; }
     return audios[id];
   }
-  function startSong(v) { var a = audioFor(v); if (a && a.paused) { var p = a.play(); if (p && p.catch) p.catch(function () {}); } }
+  function audioFor(v) { var id = reelId(v); return id ? mk(id) : null; }
+  // phones (especially iPhone) block sound until the first tap: show a small button and unlock everything on that tap
+  function showPill() {
+    if (D.getElementById('yp-sound-pill')) return;
+    var p = D.createElement('div'); p.id = 'yp-sound-pill'; p.textContent = '🔊 Tap for sound';
+    p.style.cssText = 'position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:200;background:rgba(0,0,0,.72);color:#fff;padding:10px 18px;border-radius:999px;font:700 14px sans-serif;';
+    D.body.appendChild(p);
+  }
+  function hidePill() { var p = D.getElementById('yp-sound-pill'); if (p) p.remove(); }
+  function startSong(v) {
+    var a = audioFor(v);
+    if (a && a.paused) { var p = a.play(); if (p && p.catch) p.catch(function () { if (!state.unlocked) showPill(); }); }
+  }
+  function unlock() {
+    if (state.unlocked) return;
+    state.unlocked = true; hidePill();
+    Object.keys(SONGS).forEach(function (id) {
+      var a = mk(id);
+      if (active && reelId(active) === id) { var p = a.play(); if (p && p.catch) p.catch(function () {}); }
+      else { var q = a.play(); if (q && q.then) q.then(function () { a.pause(); a.currentTime = 0; }).catch(function () {}); }
+    });
+    if (active) { active.muted = false; }
+  }
   function play(v) {
     var a = audioFor(v);
-    v.muted = !loud();
+    v.muted = !(loud() || state.unlocked);
     if (a) { v.volume = 0.2; }
     var p = v.play();
     if (p && p.catch) p.catch(function () { v.muted = true; var q = v.play(); if (q && q.catch) q.catch(function () {}); });
@@ -1861,8 +1883,9 @@ REELS_LOGIC = r"""
     v.__ypLast = 0;
     v.__ypClick = function () {
       var a = audioFor(v);
-      if (v.muted) { v.muted = false; if (v.paused) play(v); else startSong(v); }
-      else if (v.paused) { v.play(); if (a) startSong(v); }
+      if (!state.unlocked) { unlock(); if (v.paused) play(v); return; }
+      if (v.muted) { v.muted = false; }
+      if (v.paused) { v.play(); if (a) startSong(v); }
       else { v.pause(); if (a) a.pause(); }
     };
     v.__ypTime = function () {   // the video started over: start the song over too
@@ -1876,19 +1899,21 @@ REELS_LOGIC = r"""
     io.observe(v);
   }
   function setup() { D.querySelectorAll('[class*="st-key-rlcard_"] video').forEach(bind); }
-  function unmute() { if (active) { active.muted = false; startSong(active); } }
-  D.addEventListener('touchend', unmute, { once: true, passive: true });
-  D.addEventListener('click', unmute, { once: true });
+  function gesture() { unlock(); }
+  ['touchend', 'pointerup', 'click', 'keydown'].forEach(function (n) { D.addEventListener(n, gesture, true); });
   var mo = new W.MutationObserver(function () { clearTimeout(timer); timer = setTimeout(setup, 150); });
   mo.observe(D.body, { childList: true, subtree: true });
   function silence() { Object.keys(audios).forEach(function (k) { try { audios[k].pause(); } catch (x) {} }); }
   var state = {
-    audios: audios,
-    dispose: function () { io.disconnect(); mo.disconnect(); clearTimeout(timer); clearInterval(watchdog); },
+    audios: audios, unlocked: unlocked,
+    dispose: function () {
+      io.disconnect(); mo.disconnect(); clearTimeout(timer); clearInterval(watchdog);
+      ['touchend', 'pointerup', 'click', 'keydown'].forEach(function (n) { D.removeEventListener(n, gesture, true); });
+    },
   };
   // left the Reels page: stop every song
   watchdog = setInterval(function () {
-    if (!D.querySelector('[class*="st-key-rlcard_"]')) { silence(); state.dispose(); W.__ypReels = null; }
+    if (!D.querySelector('[class*="st-key-rlcard_"]')) { silence(); hidePill(); state.dispose(); W.__ypReels = null; }
   }, 700);
   W.__ypReels = state;
   setup();
@@ -1898,11 +1923,10 @@ REELS_LOGIC = r"""
 FEED_VIDEO_LOGIC = r"""
 (function () {
   var W = window, D = document;
-  if (W.__ypEnded) D.removeEventListener('ended', W.__ypEnded, true);
-  if (W.__ypPlay) D.removeEventListener('play', W.__ypPlay, true);
-  W.__ypEnded = function (e) {
-    var v = e.target;
-    if (!v || v.tagName !== 'VIDEO' || v.closest('[class*="st-key-rlcard_"]')) return;
+  if (W.__ypFeed) { try { W.__ypFeed.dispose(); } catch (e) {} }
+  var timer = null;
+  function inReel(v) { return !!v.closest('[class*="st-key-rlcard_"]'); }
+  function addAgain(v) {
     var host = v.parentElement;
     if (!host || host.querySelector('.yp-again')) return;
     if (W.getComputedStyle(host).position === 'static') host.style.position = 'relative';
@@ -1910,15 +1934,43 @@ FEED_VIDEO_LOGIC = r"""
     o.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:3;border-radius:12px;';
     var b = D.createElement('button'); b.textContent = '↻ Watch again';
     b.style.cssText = 'background:#fff;color:#111;border:none;border-radius:999px;padding:10px 20px;font-weight:700;font-size:15px;cursor:pointer;';
-    b.onclick = function (ev) { ev.stopPropagation(); o.remove(); v.currentTime = 0; v.play(); };
+    b.onclick = function (ev) { ev.stopPropagation(); o.remove(); v.__ypStopped = false; v.currentTime = 0; v.play(); };
     o.appendChild(b); host.appendChild(o);
-  };
-  W.__ypPlay = function (e) {
+  }
+  function onEnded(e) { var v = e.target; if (v && v.tagName === 'VIDEO' && !inReel(v)) { v.__ypStopped = true; addAgain(v); } }
+  function onPlay(e) {
     var v = e.target;
     if (v && v.tagName === 'VIDEO' && v.parentElement) { var o = v.parentElement.querySelector('.yp-again'); if (o) o.remove(); }
-  };
-  D.addEventListener('ended', W.__ypEnded, true);
-  D.addEventListener('play', W.__ypPlay, true);
+  }
+  function onPause(e) { var v = e.target; if (v && v.tagName === 'VIDEO' && !v.ended && !v.__ypHalting && v.__ypVisible) v.__ypStopped = true; }
+  // autoplay (silent, like Instagram) while a video is on screen; pause when it scrolls away
+  var io = new W.IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      var v = e.target;
+      if (e.isIntersecting && e.intersectionRatio >= 0.5) {
+        v.__ypVisible = true;
+        if (!v.__ypStopped && v.paused) { v.muted = true; var p = v.play(); if (p && p.catch) p.catch(function () {}); }
+      } else {
+        v.__ypVisible = false; v.__ypStopped = false;
+        if (!v.paused) { v.__ypHalting = true; v.pause(); setTimeout(function () { v.__ypHalting = false; }, 100); }
+      }
+    });
+  }, { threshold: [0, 0.5, 1] });
+  function setup() {
+    D.querySelectorAll('video').forEach(function (v) {
+      if (inReel(v) || v.__ypBound) return;
+      v.__ypBound = true; v.setAttribute('playsinline', ''); v.muted = true; io.observe(v);
+    });
+  }
+  var mo = new W.MutationObserver(function () { clearTimeout(timer); timer = setTimeout(setup, 150); });
+  mo.observe(D.body, { childList: true, subtree: true });
+  D.addEventListener('ended', onEnded, true); D.addEventListener('play', onPlay, true); D.addEventListener('pause', onPause, true);
+  W.__ypFeed = { dispose: function () {
+    io.disconnect(); mo.disconnect(); clearTimeout(timer);
+    D.removeEventListener('ended', onEnded, true); D.removeEventListener('play', onPlay, true); D.removeEventListener('pause', onPause, true);
+    D.querySelectorAll('video').forEach(function (v) { v.__ypBound = false; });
+  } };
+  setup();
 })();
 """
 
@@ -2481,7 +2533,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v52")
+    st.caption("Design v53")
     perf_slot = st.empty() if admin_mode else None
 
 if st.session_state.page != "reels":
