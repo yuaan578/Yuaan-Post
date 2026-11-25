@@ -34,7 +34,7 @@ def thai_time(iso, fmt):
 # ==========================================
 # 1. Setup
 # ==========================================
-st.set_page_config(page_title="Yuaan Post", page_icon="📸", layout="centered")
+st.set_page_config(page_title="Yuaan Post", page_icon="📸", layout="centered", initial_sidebar_state="collapsed")
 _script_start = time.perf_counter()
 st.session_state["_dbq"] = 0
 st.session_state["_dbt"] = 0.0
@@ -80,25 +80,27 @@ def darken_for_white_text(h, max_lum=0.2):
     return h
 
 
-def make_theme(bg, primary, secondary, ink=None, accents=None):
+def make_theme(bg, primary, secondary, ink=None, accents=None, flat=False):
     dark = luminance(bg) < 0.25
     if dark:
         surface = mix(bg, "#FFFFFF", 0.09)
         surface2 = mix(bg, "#FFFFFF", 0.15)
-        border = mix(bg, "#FFFFFF", 0.20)
-        ink = ink or "#F3F0FF"
+        border = mix(bg, "#FFFFFF", 0.16 if flat else 0.20)
+        ink = ink or ("#F5F5F7" if flat else "#F3F0FF")
         outline = secondary if luminance(secondary) > 0.25 else mix(secondary, "#FFFFFF", 0.5)
     else:
-        bg = mix(bg, primary, 0.10)          # page slightly deeper than the white cards, so each card stands out
+        if not flat:
+            bg = mix(bg, primary, 0.10)      # page slightly deeper than the white cards, so each card stands out
         surface = "#FFFFFF"
-        surface2 = mix(bg, primary, 0.14)
-        border = mix(bg, primary, 0.30)
+        surface2 = "#EEEEF1" if flat else mix(bg, primary, 0.14)
+        border = "#E3E3E8" if flat else mix(bg, primary, 0.30)
         ink = ink or "#1A1530"
         outline = darken_for_white_text(secondary, 0.3)
     accents = accents or [primary, secondary, mix(primary, secondary, 0.5), "#F59E0B"]
     d = darken_for_white_text
     return {
-        "line": "#F5F5F5" if dark else "#141414",   # card outlines: white on dark themes, black on light ones
+        "flat": flat,
+        "line": border if flat else ("#F5F5F5" if dark else "#141414"),   # card outlines: soft on the clean themes, white/black on the others
         "dark": dark, "bg": bg, "surface": surface, "surface2": surface2, "border": border, "ink": ink,
         "primary": primary, "outline": outline, "accents": accents,
         "btn": (d(primary), d(accents[3], 0.26)), "btn_hover": (d(secondary), d(primary)),
@@ -119,6 +121,8 @@ def make_theme(bg, primary, secondary, ink=None, accents=None):
 
 
 THEMES = {
+    "Clean":    make_theme("#F4F4F6", "#0095F6", "#8A3FFC", "#0F0F10", ["#D62976", "#962FBF", "#4F5BD5", "#FEDA75"], flat=True),
+    "Night":    make_theme("#000000", "#3EA6FF", "#B07CFF", None, ["#D62976", "#962FBF", "#4F5BD5", "#FEDA75"], flat=True),
     "Pop":      make_theme("#F6F1FF", "#E91E78", "#6C3DFF", "#1B1340", ["#E91E78", "#6C3DFF", "#00A896", "#F26B1D"]),
     "Ocean":    make_theme("#EAF6FF", "#0A6CD6", "#0A9396", "#0B2545", ["#0A6CD6", "#0A9396", "#5B5BD6", "#F59E0B"]),
     "Sunset":   make_theme("#FFF1F2", "#E8590C", "#C2185B", "#3B0A1E", ["#E8590C", "#C2185B", "#7B2CBF", "#F4A300"]),
@@ -140,16 +144,16 @@ def parse_theme(value):
         parts = value.split("|")
         if len(parts) == 4 and all(HEX_RE.match(p) for p in parts[1:]):
             return make_theme(*parts[1:])
-    return THEMES.get(value, THEMES["Pop"])
+    return THEMES.get(value, THEMES["Clean"])
 
 
-T = THEMES["Pop"]  # the theme in use; replaced after login with the user's own choice
+T = THEMES["Clean"]  # the theme in use; replaced after login with the user's own choice
 
 CSS_TEMPLATE = """
 @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600..800&family=DM+Sans:wght@400;500;700&display=swap');
 
 html, body, .stApp, [data-testid="stMarkdownContainer"], input, textarea, button { font-family: 'DM Sans', sans-serif; }
-h1, h2, h3, .yp-banner-title { font-family: 'Bricolage Grotesque', sans-serif !important; letter-spacing: -0.02em; }
+h1, h2, h3, .yp-banner-title { font-family: 'DM Sans', sans-serif !important; letter-spacing: -0.02em; font-weight: 800 !important; }
 
 .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] { background: __BG__ !important; color: __INK__; }
 [data-testid="stHeader"] { background: transparent !important; }
@@ -191,12 +195,37 @@ hr { border-color: __BORDER__ !important; }
 }
 .stTextInput input:focus, .stTextArea textarea:focus { border-color: __PRIMARY__ !important; }
 
+/* hide Streamlit's own menus so it feels like an app */
+#MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"], .stDeployButton { display: none !important; visibility: hidden !important; }
+[data-testid="stHeader"] { height: 2.6rem; }
+.block-container, [data-testid="stMainBlockContainer"] { padding-top: 1.4rem !important; padding-bottom: 110px !important; }
+h1 { font-size: 1.7rem !important; } h2 { font-size: 1.35rem !important; } h3 { font-size: 1.1rem !important; }
+
+/* bottom tab bar, like a phone app */
+.st-key-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 90; background: __SURFACE__; border-top: 1px solid __BORDER__;
+    padding: 4px 8px calc(4px + env(safe-area-inset-bottom)); }
+.st-key-tabbar > div, .st-key-tabbar [data-testid="stHorizontalBlock"] { max-width: 640px; margin: 0 auto; }
+.st-key-tabbar [data-testid="stHorizontalBlock"], .st-key-topbar [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: 0 !important; align-items: center; }
+.st-key-tabbar [data-testid="stColumn"], .st-key-topbar [data-testid="stColumn"] { min-width: 0 !important; flex: 1 1 0 !important; }
+.st-key-topbar [data-testid="stColumn"]:first-child { flex: 6 1 0 !important; }
+.st-key-tabbar button, .st-key-topbar button { border: none !important; background: transparent !important; box-shadow: none !important; color: __INK__ !important;
+    min-height: 46px; width: 100%; border-radius: 14px !important; padding: 0 !important; opacity: .55; }
+.st-key-tabbar button[kind="primary"], .st-key-topbar button[kind="primary"] { opacity: 1; color: __PRIMARY__ !important; background: transparent !important; }
+.st-key-tabbar button p, .st-key-topbar button p { font-size: 13px !important; font-weight: 700; color: inherit !important; }
+.st-key-tabbar [data-testid="stIconMaterial"], .st-key-topbar [data-testid="stIconMaterial"] { font-size: 28px !important; }
+.st-key-tabbar button:hover, .st-key-topbar button:hover { background: __SURFACE2__ !important; opacity: 1; }
+.stApp:has(.st-key-tabbar) [data-testid="stBottom"] { bottom: calc(60px + env(safe-area-inset-bottom)) !important; }
+.yp-logo { font-size: 1.7rem; font-weight: 800; letter-spacing: -0.03em; color: __INK__; line-height: 46px; }
+.yp-hero { text-align: center; margin: 7vh 0 22px; }
+.yp-hero .yp-logo { font-size: 2.4rem; line-height: 1.1; }
+.yp-hero .yp-tag { margin-top: 6px; opacity: .6; color: __INK__; }
+
 /* cards: flat, thin line */
-[data-testid="stVerticalBlockBorderWrapper"] { background: __SURFACE__; border: 1.5px solid __LINE__; border-radius: 18px;
+[data-testid="stVerticalBlockBorderWrapper"] { background: __SURFACE__; border: __LINEW__ solid __LINE__; border-radius: 18px;
     box-shadow: 0 1px 2px __SHADOW__, 0 12px 26px -12px __SHADOW__; }
 [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stVerticalBlockBorderWrapper"] { box-shadow: none; }
-[data-testid="stForm"] { background: transparent; border: 1.5px solid __LINE__; border-radius: 16px; }
-[data-testid="stExpander"] { border: 1.5px solid __LINE__; border-radius: 12px; background: transparent; }
+[data-testid="stForm"] { background: transparent; border: __LINEW__ solid __LINE__; border-radius: 16px; }
+[data-testid="stExpander"] { border: __LINEW__ solid __LINE__; border-radius: 12px; background: transparent; }
 [data-testid="stAlert"] { background: __SURFACE2__; border: none; border-radius: 12px; }
 [data-testid="stAlert"] * { color: __INK__ !important; }
 .block-container { padding-top: 2.2rem; }
@@ -227,9 +256,9 @@ button[data-baseweb="tab"][aria-selected="true"], button[data-baseweb="tab"][ari
 
 def build_css(t, wall_url=None):
     r, g, b = _rgb(t["primary"])
-    shadow = "rgba(0,0,0,.45)" if t["dark"] else f"rgba({r},{g},{b},.22)"
+    shadow = "rgba(0,0,0,.45)" if t["dark"] else ("rgba(0,0,0,.10)" if t.get("flat") else f"rgba({r},{g},{b},.22)")
     tokens = {
-        "__BG__": t["bg"], "__SURFACE__": t["surface"], "__SURFACE2__": t["surface2"], "__BORDER__": t["border"], "__LINE__": t["line"],
+        "__BG__": t["bg"], "__SURFACE__": t["surface"], "__SURFACE2__": t["surface2"], "__BORDER__": t["border"], "__LINE__": t["line"], "__LINEW__": "1px" if t.get("flat") else "1.5px",
         "__INK__": t["ink"], "__PRIMARY__": t["primary"], "__OUTLINE__": t["outline"], "__SHADOW__": shadow,
         "__BTN1__": t["btn"][0], "__BTN2__": t["btn"][1], "__HOV1__": t["btn_hover"][0], "__HOV2__": t["btn_hover"][1],
         "__BUB1__": t["bubble"][0], "__BUB2__": t["bubble"][1],
@@ -797,9 +826,9 @@ def cb_open_alerts(me):
 def get_look(username):
     """(theme, wallpaper file) in one database question."""
     if not username:
-        return "Pop", None
+        return "Clean", None
     row = ttl_cache(f"look_{username}", 30, lambda: run("SELECT theme, wallpaper FROM users WHERE username = ?", (username,), "one"))
-    return (row[0] or "Pop", row[1]) if row else ("Pop", None)
+    return (row[0] or "Clean", row[1]) if row else ("Clean", None)
 
 
 def get_theme_value(username):
@@ -1119,6 +1148,30 @@ def move_copy_files(sb_url, sb_key, budget_seconds=40, src_url=None):
     return copied, skipped, failed, left
 
 
+def cb_test_video_tool():
+    """Checks, step by step, whether songs can be put inside videos on this server."""
+    lines = []
+    ff = _ffmpeg_path()
+    lines.append(f"video tool (ffmpeg): {'found' if ff else 'NOT available'}")
+    if ff:
+        try:
+            songs = search_songs("love yourself justin bieber") or []
+            lines.append(f"song search: {len(songs)} results")
+            data = fetch_song_bytes(songs[0]["url"]) if songs else None
+            lines.append(f"song download: {'ok, %d bytes' % len(data) if data else 'FAILED'}")
+            with tempfile.TemporaryDirectory() as tmp:
+                vid = os.path.join(tmp, "t.mp4")
+                made = subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=s=160x120:d=2", "-c:v", "libx264",
+                                       "-pix_fmt", "yuv420p", vid], capture_output=True, timeout=60)
+                lines.append(f"make a test video: {'ok' if made.returncode == 0 else 'FAILED ' + made.stderr.decode('utf-8', 'ignore')[-120:]}")
+                if made.returncode == 0 and songs:
+                    out = mix_song_into_video(open(vid, "rb").read(), songs[0]["url"])
+                    lines.append(f"put the song inside the video: {'ok, %d bytes' % len(out) if out else 'FAILED - ' + (st.session_state.get('mix_error') or '')}")
+        except Exception as e:
+            lines.append(f"test crashed: {type(e).__name__}: {e}")
+    st.session_state["video_tool_result"] = lines
+
+
 def cb_resolve_report(report_id, me):
     if is_admin(me):
         run("DELETE FROM reports WHERE id = ?", (report_id,))
@@ -1369,14 +1422,17 @@ def mix_song_into_video(video_bytes, song_url):
             vin, sin, out = (os.path.join(tmp, n) for n in ("in_video", "in_song", "out.mp4"))
             open(vin, "wb").write(video_bytes)
             open(sin, "wb").write(song)
-            tail = ["-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-shortest", out]
+            copy_tail = ["-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-shortest", out]
+            enc_tail = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+                        "-movflags", "+faststart", "-shortest", out]
             base = [ff, "-y", "-loglevel", "error", "-i", vin, "-stream_loop", "-1", "-i", sin]
+            mixf = ["-filter_complex", "[0:a]volume=0.5[a0];[1:a]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[a]", "-map", "0:v", "-map", "[a]"]
+            songonly = ["-map", "0:v", "-map", "1:a"]
             attempts = [
-                # the video has its own sound: keep it, a little quieter, under the song
-                base + ["-filter_complex", "[0:a]volume=0.5[a0];[1:a]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]",
-                        "-map", "0:v", "-map", "[a]"] + tail,
-                # no sound in the video: just the song
-                base + ["-map", "0:v", "-map", "1:a"] + tail,
+                base + mixf + copy_tail,        # the video has its own sound: keep it, quieter, under the song
+                base + songonly + copy_tail,    # the video has no sound: just the song
+                base + mixf + enc_tail,         # same two again, re-encoding (for .mov / webm / phone formats)
+                base + songonly + enc_tail,
             ]
             for cmd in attempts:
                 try:
@@ -1386,6 +1442,8 @@ def mix_song_into_video(video_bytes, song_url):
                     continue
                 if done.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 1000:
                     return open(out, "rb").read()
+                if os.path.exists(out):
+                    os.remove(out)
                 st.session_state["mix_error"] = "ffmpeg said: " + done.stderr.decode("utf-8", "ignore").strip()[-160:]
         return None
     except Exception as e:
@@ -1520,9 +1578,9 @@ def post_actions(post_id, author, me, prefix, show_profile=True):
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     c1.button(f"{'❤️' if mine else '🤍'} {count}", key=f"{prefix}_like_{post_id}", on_click=cb_toggle_post_like,
               args=(post_id, me), use_container_width=True)
-    c2.button("🔖" if is_saved else "🏷️", key=f"{prefix}_save_{post_id}", on_click=cb_toggle_save,
+    c2.button(":material/bookmark_added:" if is_saved else ":material/bookmark:", key=f"{prefix}_save_{post_id}", on_click=cb_toggle_save,
               args=(post_id, me), use_container_width=True, help="Unsave" if is_saved else "Save")
-    with c3.popover("↗", use_container_width=True):
+    with c3.popover(":material/send:", use_container_width=True):
         targets = st.session_state.get("_share_targets", [])
         if not targets:
             st.caption("Add a friend first, then you can share posts with them.")
@@ -1530,7 +1588,7 @@ def post_actions(post_id, author, me, prefix, show_profile=True):
             st.selectbox("Send to", [t[0] for t in targets], format_func=dict(targets).get,
                          key=f"{prefix}_shto_{post_id}")
             st.button("Send", key=f"{prefix}_shsend_{post_id}", on_click=cb_share_post, args=(post_id, prefix, me))
-    with c4.popover("⋯", use_container_width=True):
+    with c4.popover(":material/more_horiz:", use_container_width=True):
         if author != me:
             friend_button(st, me, author, f"{prefix}_friend_{post_id}")
             follow_button(st, me, author, f"{prefix}_follow_{post_id}")
@@ -2519,19 +2577,32 @@ if not st.session_state.logged_in:
         else:
             del st.query_params["s"]
 
+PWA_JS = """(function () {
+  var d = document;
+  function m(n, c) { var e = d.querySelector('meta[name="' + n + '"]'); if (!e) { e = d.createElement('meta'); e.name = n; d.head.appendChild(e); } e.content = c; }
+  m('apple-mobile-web-app-capable', 'yes'); m('mobile-web-app-capable', 'yes');
+  m('apple-mobile-web-app-title', 'Yuaan'); m('apple-mobile-web-app-status-bar-style', 'default');
+  var v = d.querySelector('meta[name=viewport]');
+  if (v && v.content.indexOf('viewport-fit') < 0) { v.content += ', viewport-fit=cover'; }
+})();"""
+if not st.session_state.get("_pwa_done"):
+    components.html(inject_js(PWA_JS, "yp-pwa-js"), height=0)
+    st.session_state["_pwa_done"] = True
+
 # Apply the colours: the logged-in user's own theme, or the default on the login page
-_theme_value, _wallpaper = get_look(st.session_state.username) if st.session_state.logged_in else ("Pop", None)
+_theme_value, _wallpaper = get_look(st.session_state.username) if st.session_state.logged_in else ("Clean", None)
 T = parse_theme(_theme_value)
 st.markdown(f"<style>{build_css(T, file_url(_wallpaper) if _wallpaper else None)}</style>", unsafe_allow_html=True)
 
 if not st.session_state.logged_in:
-    banner("Yuaan Post", "Log in or sign up to share moments with your friends.", "feed")
-    tab1, tab2 = st.tabs(["Login", "Sign Up"])
+    st.markdown('<div class="yp-hero"><div class="yp-logo">Yuaan Post</div>'
+                '<div class="yp-tag">Share moments with the people you love.</div></div>', unsafe_allow_html=True)
+    tab1, tab2 = st.tabs(["Log in", "Sign up"])
 
     with tab1:
         login_user = st.text_input("Username", key="login_user")
         login_pass = st.text_input("Password", type="password", key="login_pass")
-        if st.button("Login"):
+        if st.button("Log in", type="primary", use_container_width=True):
             login_user = login_user.strip()
             row = run("SELECT password FROM users WHERE username = ?", (login_user,), "one")
             if row and check_password(login_pass, row[0]):
@@ -2550,7 +2621,7 @@ if not st.session_state.logged_in:
         reg_user = st.text_input("Username", key="reg_user")
         reg_pass = st.text_input("Password", type="password", key="reg_pass")
         reg_name = st.text_input("Display name", key="reg_name")
-        if st.button("Sign Up"):
+        if st.button("Create account", type="primary", use_container_width=True):
             if reg_user and reg_pass and reg_name:
                 try:
                     run("INSERT INTO users (username, password, display_name) VALUES (?, ?, ?)", (reg_user.strip(), hash_password(reg_pass), reg_name))
@@ -2579,17 +2650,17 @@ admin_mode = is_admin(current_user)
 open_reports = ttl_cache("open_reports", 10, lambda: run("SELECT COUNT(*) FROM reports", fetch="one")[0]) if admin_mode else 0
 
 PAGE_LABELS = {
-    "feed": "🏠 Feed",
-    "foryou": "✨ For You",
-    "search": "🔍 Search",
-    "alerts": "🔔 Alerts" + (f"  ·  {alert_n}" if alert_n else ""),
-    "reels": "🎬 Reels",
-    "friends": "👥 Friends" + (f"  ·  {pending_count}" if pending_count else ""),
-    "chats": "💬 Chats" + (f"  ·  {unread_count}" if unread_count else ""),
-    "yuaan": "🤖 Yuaan",
+    "feed": ":material/home: Home",
+    "foryou": ":material/auto_awesome: For You",
+    "search": ":material/search: Search",
+    "alerts": ":material/notifications: Alerts" + (f"  ·  {alert_n}" if alert_n else ""),
+    "reels": ":material/play_circle: Reels",
+    "friends": ":material/group: Friends" + (f"  ·  {pending_count}" if pending_count else ""),
+    "chats": ":material/chat_bubble: Chats" + (f"  ·  {unread_count}" if unread_count else ""),
+    "yuaan": ":material/smart_toy: Yuaan AI",
 }
 if admin_mode:
-    PAGE_LABELS["admin"] = "🛡 Admin" + (f"  ·  {open_reports}" if open_reports else "")
+    PAGE_LABELS["admin"] = ":material/shield: Admin" + (f"  ·  {open_reports}" if open_reports else "")
 
 with st.sidebar:
     st.markdown(person_html(current_user, size=44, subtitle=f"@{html.escape(current_user)}"), unsafe_allow_html=True)
@@ -2601,7 +2672,7 @@ with st.sidebar:
                   args=(current_user,) if page_key == "alerts" else (page_key,))
 
     st.divider()
-    with st.expander("⚙️ Profile Settings"):
+    with st.expander("Profile settings"):
         pic = st.file_uploader("Profile picture", type=["png", "jpg", "jpeg"],
                                key=f"avatar_upload_{st.session_state.avatar_nonce}")
         if st.button("Save picture"):
@@ -2628,7 +2699,7 @@ with st.sidebar:
         st.divider()
         st.button("Sign out", on_click=cb_sign_out)
 
-    with st.expander("🔒 Account & privacy"):
+    with st.expander("Account & privacy"):
         st.text_input("Current password", type="password", key="pw_cur")
         st.text_input("New password (6+ characters)", type="password", key="pw_new")
         st.text_input("New password again", type="password", key="pw_new2")
@@ -2641,9 +2712,9 @@ with st.sidebar:
             c1.write(get_display_name(u))
             c2.button("Unblock", key=f"unblock_{u}", on_click=cb_unblock_user, args=(current_user, u))
 
-    with st.expander("🎨 Theme"):
+    with st.expander("Theme"):
         saved = get_theme_value(current_user)
-        saved_name = "Custom" if saved.startswith("custom|") else (saved if saved in THEMES else "Pop")
+        saved_name = "Custom" if saved.startswith("custom|") else (saved if saved in THEMES else "Clean")
         st.selectbox("Choose a theme", THEME_NAMES, index=THEME_NAMES.index(saved_name), key="theme_choice", on_change=cb_save_theme)
 
         if st.session_state.theme_choice == "Custom":
@@ -2683,11 +2754,25 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v58")
+    st.caption("Design v60")
     perf_slot = st.empty() if admin_mode else None
 
 if st.session_state.page != "reels":
     components.html(inject_js(FEED_VIDEO_LOGIC, "yp-feedvideo-js"), height=0)
+    _tab = st.session_state.page
+    _on_me = _tab == "profile" and st.session_state.get("profile_user") == current_user
+    with st.container(key="tabbar"):
+        t1, t2, t3, t4, t5 = st.columns(5)
+        t1.button(":material/home:", key="tab_feed", on_click=cb_go_page, args=("feed",), use_container_width=True,
+                  type="primary" if _tab in ("feed", "foryou") else "secondary", help="Home")
+        t2.button(":material/play_circle:", key="tab_reels", on_click=cb_go_page, args=("reels",), use_container_width=True,
+                  type="secondary", help="Reels")
+        t3.button(":material/chat_bubble:" + (f" {unread_count}" if unread_count else ""), key="tab_chats", on_click=cb_go_page, args=("chats",),
+                  use_container_width=True, type="primary" if _tab == "chats" else "secondary", help="Chats")
+        t4.button(":material/notifications:" + (f" {alert_n}" if alert_n else ""), key="tab_alerts", on_click=cb_open_alerts, args=(current_user,),
+                  use_container_width=True, type="primary" if _tab == "alerts" else "secondary", help="Alerts")
+        t5.button(":material/person:", key="tab_me", on_click=cb_view_profile, args=(current_user,), use_container_width=True,
+                  type="primary" if _on_me else "secondary", help="Profile")
 if st.session_state.get("flash_warn"):
     st.warning(st.session_state.pop("flash_warn"))
 
@@ -2864,7 +2949,12 @@ incoming_call_watcher(current_user)
 # PAGE: Feed
 # ------------------------------------------
 if st.session_state.page == "feed":
-    banner("Yuaan Post", "What your friends are up to.", "feed")
+    with st.container(key="topbar"):
+        h1, h2, h3 = st.columns([6, 1, 1])
+        h1.markdown('<div class="yp-logo">Yuaan Post</div>', unsafe_allow_html=True)
+        h2.button(":material/search:", key="top_search", on_click=cb_go_page, args=("search",), use_container_width=True, help="Search")
+        h3.button(":material/group:" + (f" {pending_count}" if pending_count else ""), key="top_friends", on_click=cb_go_page,
+                  args=("friends",), use_container_width=True, help="Friends")
 
     story_circle = set(get_friends(current_user)) | set(get_following(current_user))
     story_viewer(current_user)
@@ -3456,6 +3546,11 @@ elif st.session_state.page == "admin":
         if st.session_state.get("server_place"):
             st.caption(f"The app's computer is in: {st.session_state['server_place']}. Put the database in the same part of the world.")
         st.caption(f"Last page: {st.session_state.get('_dbq', 0)} database trips took {st.session_state.get('_dbt', 0):.1f} s.")
+
+        st.subheader("🎵 Video tool check")
+        st.button("Test putting a song inside a video", key="vtool_btn", on_click=cb_test_video_tool)
+        if st.session_state.get("video_tool_result"):
+            st.code("\n".join(st.session_state["video_tool_result"]))
 
         st.subheader("🖼 Fix missing photos")
         old_sb = (get_secret("OLD_SUPABASE_URL") or "").strip().rstrip("/")
