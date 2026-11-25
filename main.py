@@ -212,6 +212,11 @@ h1 { font-size: 1.7rem !important; } h2 { font-size: 1.35rem !important; } h3 { 
 .st-key-tabbar [data-testid="stHorizontalBlock"], .st-key-topbar [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: 0 !important; align-items: center; }
 .st-key-tabbar [data-testid="stColumn"], .st-key-topbar [data-testid="stColumn"] { min-width: 0 !important; flex: 1 1 0 !important; }
 .st-key-topbar [data-testid="stColumn"]:first-child { flex: 6 1 0 !important; }
+/* the like / save / share / more buttons of a post: always one row, even on a phone */
+[class*="_acts_"] [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: 8px !important; }
+[class*="_acts_"] [data-testid="stColumn"] { min-width: 0 !important; width: auto !important; }
+[class*="_acts_"] [data-testid="stColumn"]:first-child { flex: 2 1 0 !important; }
+[class*="_acts_"] [data-testid="stColumn"]:not(:first-child) { flex: 1 1 0 !important; }
 .st-key-tabbar button, .st-key-topbar button { border: none !important; background: transparent !important; box-shadow: none !important; color: __INK__ !important;
     min-height: 46px; width: 100%; border-radius: 14px !important; padding: 0 !important; opacity: .55; }
 .st-key-tabbar button[kind="primary"], .st-key-topbar button[kind="primary"] { opacity: 1; color: __PRIMARY__ !important; background: transparent !important; }
@@ -1584,7 +1589,8 @@ def post_actions(post_id, author, me, prefix, show_profile=True):
     """One quiet row: like, save, share, and a ⋯ menu (add friend, follow, profile, delete)."""
     count, mine = st.session_state.get("_likes", {}).get(post_id, (0, False))
     is_saved = post_id in st.session_state.get("_saved", set())
-    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+    with st.container(key=f"{prefix}_acts_{post_id}"):
+        c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     c1.button(f"{'❤️' if mine else '🤍'} {count}", key=f"{prefix}_like_{post_id}", on_click=cb_toggle_post_like,
               args=(post_id, me), use_container_width=True)
     c2.button(":material/bookmark_added:" if is_saved else ":material/bookmark:", key=f"{prefix}_save_{post_id}", on_click=cb_toggle_save,
@@ -2763,16 +2769,19 @@ with st.sidebar:
         if get_look(current_user)[1]:
             w2.button("Remove", key="wall_rm_btn", on_click=cb_remove_wallpaper, use_container_width=True)
 
+        st.checkbox("Leave room at the bottom-right for Streamlit's red badge (only the app owner sees it)", key="owner_room")
         dots = "".join(f'<span style="display:inline-block;width:26px;height:26px;border-radius:50%;background:{c};margin-right:6px;"></span>'
                        for c in T["accents"])
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v62")
+    st.caption("Design v63")
     perf_slot = st.empty() if admin_mode else None
 
 if st.session_state.page != "reels":
     components.html(inject_js(FEED_VIDEO_LOGIC, "yp-feedvideo-js"), height=0)
+    if admin_mode or st.session_state.get("owner_room"):
+        st.markdown("<style>.st-key-tabbar { padding-right: 150px !important; }</style>", unsafe_allow_html=True)
     _tab = st.session_state.page
     _on_me = _tab == "profile" and st.session_state.get("profile_user") == current_user
     with st.container(key="tabbar"):
