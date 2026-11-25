@@ -144,10 +144,10 @@ def parse_theme(value):
         parts = value.split("|")
         if len(parts) == 4 and all(HEX_RE.match(p) for p in parts[1:]):
             return make_theme(*parts[1:])
-    return THEMES.get(value, THEMES["Clean"])
+    return THEMES.get(value, THEMES["Pop"])
 
 
-T = THEMES["Clean"]  # the theme in use; replaced after login with the user's own choice
+T = THEMES["Pop"]  # the theme in use; replaced after login with the user's own choice
 
 CSS_TEMPLATE = """
 @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600..800&family=DM+Sans:wght@400;500;700&display=swap');
@@ -196,7 +196,11 @@ hr { border-color: __BORDER__ !important; }
 .stTextInput input:focus, .stTextArea textarea:focus { border-color: __PRIMARY__ !important; }
 
 /* hide Streamlit's own menus so it feels like an app */
-#MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"], .stDeployButton { display: none !important; visibility: hidden !important; }
+#MainMenu, footer, [data-testid="stDecoration"], [data-testid="stStatusWidget"], .stDeployButton, .stAppDeployButton,
+[data-testid="stToolbarActions"], [data-testid="stMainMenu"], [data-testid="stAppDeployButton"] { display: none !important; visibility: hidden !important; }
+/* the arrow that opens the side menu must always stay */
+[data-testid="stToolbar"], [data-testid="stSidebarCollapsedControl"], [data-testid="collapsedControl"], [data-testid="stExpandSidebarButton"] { visibility: visible !important; }
+[data-testid="stSidebarCollapsedControl"], [data-testid="collapsedControl"], [data-testid="stExpandSidebarButton"] { display: flex !important; z-index: 120; }
 [data-testid="stHeader"] { height: 2.6rem; }
 .block-container, [data-testid="stMainBlockContainer"] { padding-top: 1.4rem !important; padding-bottom: 110px !important; }
 h1 { font-size: 1.7rem !important; } h2 { font-size: 1.35rem !important; } h3 { font-size: 1.1rem !important; }
@@ -219,6 +223,11 @@ h1 { font-size: 1.7rem !important; } h2 { font-size: 1.35rem !important; } h3 { 
 .yp-hero { text-align: center; margin: 7vh 0 22px; }
 .yp-hero .yp-logo { font-size: 2.4rem; line-height: 1.1; }
 .yp-hero .yp-tag { margin-top: 6px; opacity: .6; color: __INK__; }
+.st-key-auth { max-width: 400px; margin: 0 auto; }
+.yp-mark { width: 68px; height: 68px; border-radius: 22px; margin: 0 auto 14px; display: flex; align-items: center; justify-content: center;
+    font-size: 34px; font-weight: 800; color: #fff; background: linear-gradient(135deg, __PRIMARY__, __OUTLINE__); box-shadow: 0 10px 24px -10px __SHADOW__; }
+.yp-foot { text-align: center; margin-top: 22px; font-size: 13px; opacity: .55; color: __INK__; }
+.st-key-auth [data-testid="stTabs"] [role="tablist"] { justify-content: center; gap: 8px; }
 
 /* cards: flat, thin line */
 [data-testid="stVerticalBlockBorderWrapper"] { background: __SURFACE__; border: __LINEW__ solid __LINE__; border-radius: 18px;
@@ -826,9 +835,9 @@ def cb_open_alerts(me):
 def get_look(username):
     """(theme, wallpaper file) in one database question."""
     if not username:
-        return "Clean", None
+        return "Pop", None
     row = ttl_cache(f"look_{username}", 30, lambda: run("SELECT theme, wallpaper FROM users WHERE username = ?", (username,), "one"))
-    return (row[0] or "Clean", row[1]) if row else ("Clean", None)
+    return (row[0] or "Pop", row[1]) if row else ("Pop", None)
 
 
 def get_theme_value(username):
@@ -2590,46 +2599,51 @@ if not st.session_state.get("_pwa_done"):
     st.session_state["_pwa_done"] = True
 
 # Apply the colours: the logged-in user's own theme, or the default on the login page
-_theme_value, _wallpaper = get_look(st.session_state.username) if st.session_state.logged_in else ("Clean", None)
+_theme_value, _wallpaper = get_look(st.session_state.username) if st.session_state.logged_in else ("Pop", None)
 T = parse_theme(_theme_value)
 st.markdown(f"<style>{build_css(T, file_url(_wallpaper) if _wallpaper else None)}</style>", unsafe_allow_html=True)
 
 if not st.session_state.logged_in:
-    st.markdown('<div class="yp-hero"><div class="yp-logo">Yuaan Post</div>'
-                '<div class="yp-tag">Share moments with the people you love.</div></div>', unsafe_allow_html=True)
-    tab1, tab2 = st.tabs(["Log in", "Sign up"])
+    with st.container(key="auth"):
+        st.markdown('<div class="yp-hero"><div class="yp-mark">Y</div><div class="yp-logo">Yuaan Post</div>'
+                    '<div class="yp-tag">Share moments with the people you love.</div></div>', unsafe_allow_html=True)
+        tab1, tab2 = st.tabs(["Log in", "Sign up"])
 
-    with tab1:
-        login_user = st.text_input("Username", key="login_user")
-        login_pass = st.text_input("Password", type="password", key="login_pass")
-        if st.button("Log in", type="primary", use_container_width=True):
-            login_user = login_user.strip()
-            row = run("SELECT password FROM users WHERE username = ?", (login_user,), "one")
-            if row and check_password(login_pass, row[0]):
-                if not row[0].startswith("pbkdf2$"):  # an old plain-text password: scramble it now
-                    run("UPDATE users SET password = ? WHERE username = ?", (hash_password(login_pass), login_user))
-                st.session_state.logged_in = True
-                st.session_state.username = login_user
-                token = create_session(login_user)
-                st.session_state.token = token
-                st.query_params["s"] = token
-                st.rerun()
-            else:
-                st.error("Username or Password is incorrect!")
+        with tab1:
+            login_user = st.text_input("Username", key="login_user", placeholder="Username", label_visibility="collapsed")
+            login_pass = st.text_input("Password", type="password", key="login_pass", placeholder="Password", label_visibility="collapsed")
+            if st.button("Log in", type="primary", use_container_width=True):
+                login_user = login_user.strip()
+                row = run("SELECT password FROM users WHERE username = ?", (login_user,), "one")
+                if row and check_password(login_pass, row[0]):
+                    if not row[0].startswith("pbkdf2$"):  # an old plain-text password: scramble it now
+                        run("UPDATE users SET password = ? WHERE username = ?", (hash_password(login_pass), login_user))
+                    st.session_state.logged_in = True
+                    st.session_state.username = login_user
+                    token = create_session(login_user)
+                    st.session_state.token = token
+                    st.query_params["s"] = token
+                    st.rerun()
+                else:
+                    st.error("Username or password is incorrect.")
 
-    with tab2:
-        reg_user = st.text_input("Username", key="reg_user")
-        reg_pass = st.text_input("Password", type="password", key="reg_pass")
-        reg_name = st.text_input("Display name", key="reg_name")
-        if st.button("Create account", type="primary", use_container_width=True):
-            if reg_user and reg_pass and reg_name:
-                try:
-                    run("INSERT INTO users (username, password, display_name) VALUES (?, ?, ?)", (reg_user.strip(), hash_password(reg_pass), reg_name))
-                    st.success("success! go to the login page to start")
-                except psycopg2.IntegrityError:
-                    st.error("This username has been taken please select a new one!")
-            else:
-                st.warning("Add all information")
+        with tab2:
+            reg_name = st.text_input("Display name", key="reg_name", placeholder="Your name (shown to friends)", label_visibility="collapsed")
+            reg_user = st.text_input("Username", key="reg_user", placeholder="Choose a username", label_visibility="collapsed")
+            reg_pass = st.text_input("Password", type="password", key="reg_pass", placeholder="Password (6 or more characters)",
+                                     label_visibility="collapsed")
+            if st.button("Create account", type="primary", use_container_width=True):
+                if not (reg_user.strip() and reg_pass and reg_name.strip()):
+                    st.warning("Please fill in all three boxes.")
+                elif len(reg_pass) < 6:
+                    st.warning("Your password needs at least 6 characters.")
+                else:
+                    try:
+                        run("INSERT INTO users (username, password, display_name) VALUES (?, ?, ?)", (reg_user.strip(), hash_password(reg_pass), reg_name.strip()))
+                        st.success("Account created. Switch to Log in to start.")
+                    except psycopg2.IntegrityError:
+                        st.error("That username is taken. Please choose another.")
+        st.markdown('<div class="yp-foot">Posts · Reels · Chats · Calls — all in one place</div>', unsafe_allow_html=True)
     st.stop()
 
 # ==========================================
@@ -2714,7 +2728,7 @@ with st.sidebar:
 
     with st.expander("Theme"):
         saved = get_theme_value(current_user)
-        saved_name = "Custom" if saved.startswith("custom|") else (saved if saved in THEMES else "Clean")
+        saved_name = "Custom" if saved.startswith("custom|") else (saved if saved in THEMES else "Pop")
         st.selectbox("Choose a theme", THEME_NAMES, index=THEME_NAMES.index(saved_name), key="theme_choice", on_change=cb_save_theme)
 
         if st.session_state.theme_choice == "Custom":
@@ -2754,7 +2768,7 @@ with st.sidebar:
         st.markdown(f'<div style="margin-top:6px;">{dots}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.caption("Design v60")
+    st.caption("Design v62")
     perf_slot = st.empty() if admin_mode else None
 
 if st.session_state.page != "reels":
